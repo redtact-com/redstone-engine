@@ -175,7 +175,8 @@ mod tests {
     // V06 §4.12.2 の表 (原点の近くは組が崩れる例) と、V18 §4.2 の「R1 の実例」[ライブラリ実測]。
     #[test]
     fn r1_order_matches_notes() {
-        let cases: [((i32, i32, i32), [Option<Dir>; 7]); 9] = [
+        type Case = ((i32, i32, i32), [Option<Dir>; 7]);
+        let cases: [Case; 9] = [
             (
                 (0, 1, 0),
                 [s(Down), s(South), s(East), s(North), s(Up), s(West), P],
@@ -238,10 +239,7 @@ mod tests {
         assert!(!set.remove(&H(17)));
         assert!(!set.contains(&H(17)));
         assert_eq!(set.bucket_count(), 16);
-        assert_eq!(
-            set.iter().copied().collect::<Vec<_>>(),
-            [H(1), H(33), H(2)]
-        );
+        assert_eq!(set.iter().copied().collect::<Vec<_>>(), [H(1), H(33), H(2)]);
     }
 
     // 13 個目で 16 → 32 に拡張する (V18 §4.2 の「入れる」の 6)。
