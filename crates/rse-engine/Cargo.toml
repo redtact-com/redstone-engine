@@ -1,0 +1,16 @@
+[package]
+name = "rse-engine"
+description = "組み立て: 素子の族を feature で選び、振る舞いの振り分けを持つ"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# 配る版は既定の feature (実装済みの族の全部) だけで組む。feature は開発で族を切り離すために使う
+default = ["redstone"]
+redstone = ["dep:rse-blocks-redstone"]
+
+[dependencies]
+rse-core = { path = "../rse-core" }
+rse-blocks-redstone = { path = "../rse-blocks-redstone", optional = true }

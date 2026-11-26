@@ -1,0 +1,9 @@
+[package]
+name = "rse-java"
+description = "Java の意味論の写し (方向の表・位置の詰め方とハッシュ値・HashSet の順)。外部の依存を持たない"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
