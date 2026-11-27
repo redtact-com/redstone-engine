@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust の toolchain (rust-toolchain.toml のとおり)
+        run: |
+          rustup toolchain install || true
+          rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: 整形
+        run: cargo fmt --all --check
+      - name: lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: テスト
+        run: cargo test --workspace
+      - name: wasm のビルド
+        run: cargo build -p rse-wasm --target wasm32-unknown-unknown --release
+      - name: 大きさの報告 (合否にしない)
+        run: |
+          node -e '
+            const fs = require("fs"), z = require("zlib")
+            const p = "target/wasm32-unknown-unknown/release/rse_wasm.wasm"
+            const b = fs.readFileSync(p)
+            const gz = z.gzipSync(b, { level: 9 }).length
+            const br = z.brotliCompressSync(b, { params: { [z.constants.BROTLI_PARAM_QUALITY]: 11 } }).length
+            const row = `| rse_wasm.wasm | ${b.length} | ${gz} | ${br} |`
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+              "## 大きさ (バイト。合否にしない)\n\n| 物 | 素 | gzip | brotli |\n|---|---:|---:|---:|\n" + row + "\n")
+            console.log(row)
+          '
+
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: 型
+        run: npm run typecheck
+      - name: テスト (IP の検査を含む)
+        run: npm test

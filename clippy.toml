@@ -1,0 +1,6 @@
+# 反復順が実行ごとに変わる標準の HashMap・HashSet を禁じる (19 §2.2・§9.3)。
+# 順序を Java と合わせる所は rse-java の写しを使い、それ以外は BTreeMap か Vec にする。
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "反復順が決まらない。rse-java の写しか BTreeMap を使う" },
+  { path = "std::collections::HashSet", reason = "反復順が決まらない。rse-java の写しか BTreeSet を使う" },
+]

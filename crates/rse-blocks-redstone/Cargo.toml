@@ -1,0 +1,10 @@
+[package]
+name = "rse-blocks-redstone"
+description = "素子の族: レバー・ダスト・ランプ (縦切り)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rse-core = { path = "../rse-core" }

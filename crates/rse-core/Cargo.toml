@@ -1,0 +1,10 @@
+[package]
+name = "rse-core"
+description = "エンジンの骨格: 状態表・世界・書き込みと近隣更新・予約 tick・ブロックイベント・相・入力・信号の問い合わせ・変化の記録"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+rse-java = { path = "../rse-java" }

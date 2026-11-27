@@ -1,0 +1,26 @@
+# Rust
+/target/
+
+# JS
+node_modules/
+dist/
+*.tsbuildinfo
+
+# 生成物 (ビルドの時に作る。追跡しない)
+*.wasm
+/packages/engine-js/generated/
+
+# テストと e2e の出力
+/test-results/
+/playwright-report/
+coverage/
+
+# デコンパイルの出力・jar・mappings はこの repo に置かない (docs/ip-policy.md)
+*.jar
+*.class
+
+# 手元の設定
+.env
+.env.*
+.DS_Store
+.claude/settings.local.json

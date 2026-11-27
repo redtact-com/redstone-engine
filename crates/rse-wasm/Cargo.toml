@@ -1,0 +1,13 @@
+[package]
+name = "rse-wasm"
+description = "wasm の窓口 (C ABI)。unsafe はこの crate だけ"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rse-engine = { path = "../rse-engine" }

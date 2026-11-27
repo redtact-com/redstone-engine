@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+# license は LICENSE を置くまで書かない (redstone-sim と一緒に決める)
+
+# 19 §2.8: opt-level z は tick が 3.9〜4.3 倍遅くなるので使わない
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
