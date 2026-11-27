@@ -178,25 +178,17 @@ impl Registry {
         if cells.iter().any(|c| c.state as usize >= STATE_COUNT) {
             return status::ARGUMENT;
         }
-        let pos = |c: &CellRec| Pos::new(c.x, c.y, c.z);
-        if cells.iter().any(|c| !world.in_bounds(pos(c))) {
+        // 高さの外と、格子の枠の外 (今の格子と列を合わせると 1 辺 256 セクションを超える) は、置く前に
+        // rse-core で確かめ、1 つも書かずに断る (全部か無しか)。格子もセクションも増やさない。
+        let cell = |c: &CellRec| (Pos::new(c.x, c.y, c.z), StateId(c.state as u16));
+        if !world.can_set_all_raw(cells.iter().map(cell)) {
             return status::OUT_OF_WORLD;
         }
-        // 格子の枠 (離れすぎた 2 点) は置いてみるまで分からない。置けなかったら、それまでに置いたマスを
-        // 逆の順に前の状態へ戻し、1 つも置かなかった形にする (全部か無しか)。書いて戻したマスは正味の変化に
-        // ならない (19 §3.8)。広げた格子 (空のセクションの席) は残るが、読める状態は変わらない。
-        let mut placed: Vec<(Pos, StateId)> = Vec::with_capacity(cells.len());
         for c in cells {
-            let at = pos(c);
-            let before = world.get_state(at);
-            if !world.set_state_raw(at, StateId(c.state as u16)) {
-                for (at, before) in placed.into_iter().rev() {
-                    // 一度書けた所なので、戻す書き込みは必ず通る。
-                    world.set_state_raw(at, before);
-                }
-                return status::OUT_OF_WORLD;
-            }
-            placed.push((at, before));
+            let (pos, state) = cell(c);
+            let placed = world.set_state_raw(pos, state);
+            // 上で全部書けると確かめたので、ここで断られることは無い。
+            debug_assert!(placed, "can_set_all_raw が通したのに置けない");
         }
         Status::OK.0
     }

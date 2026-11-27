@@ -76,9 +76,12 @@ export class Core {
     }
   }
 
-  /** 作業領域を len バイト以上に広げ、先頭の番地を返す。線形メモリが伸びうるので、窓はこの後に作る */
-  scratch(len: number): number {
-    const ptr = this.call('scratch', x => x.rse_scratch(len)) >>> 0
+  /**
+   * 作業領域を len バイト以上に広げ、先頭の番地を返す。線形メモリが伸びうるので、窓はこの後に作る。
+   * @param what 例外の文に出す、呼んだ側の操作の名前
+   */
+  scratch(len: number, what = 'scratch'): number {
+    const ptr = this.call(what, x => x.rse_scratch(len)) >>> 0
     if (ptr === 0) throw new RangeError(`作業領域を ${len} バイトに広げられない`)
     return ptr
   }
@@ -113,6 +116,12 @@ function exportsOf(exports: WebAssembly.Exports): RseExports {
   return x as unknown as RseExports
 }
 
+/**
+ * Engine を作った線形メモリ。同じ書き出し (同じインスタンス) から Engine を 2 つ作ると、呼んだ回数 (epoch) が
+ * 分かれ、片方の呼び出しで線形メモリが伸びても、もう片方の窓が古いと分からない。そこで 2 つ目は断る。
+ */
+const claimed = new WeakSet<WebAssembly.Memory>()
+
 export class Engine {
   readonly states: StateTable
   readonly #core: Core
@@ -131,10 +140,17 @@ export class Engine {
     return Engine.fromExports((await instantiate(wasm)).exports, states)
   }
 
-  /** インスタンスを自分で作った時に、その書き出しから作る。確かめは `load` と同じ */
+  /**
+   * インスタンスを自分で作った時に、その書き出しから作る。確かめは `load` と同じ。
+   * 1 つのインスタンス (線形メモリ) から作れる Engine は 1 つだけ。
+   */
   static fromExports(exports: WebAssembly.Exports, states: unknown): Engine {
-    const engine = new Engine(new Core(exportsOf(exports)), states instanceof StateTable ? states : StateTable.parse(states))
+    const raw = exportsOf(exports)
+    if (claimed.has(raw.memory)) throw new Error('この wasm のインスタンスには、もう Engine がある (同じ線形メモリで 2 つ目は作れない)')
+    const engine = new Engine(new Core(raw), states instanceof StateTable ? states : StateTable.parse(states))
     engine.#checkTable()
+    // 確かめが通ってから覚える (状態表の JSON を直して、同じインスタンスで作り直せるように)。
+    claimed.add(raw.memory)
     return engine
   }
 
@@ -194,7 +210,7 @@ export class Engine {
     if (cached !== undefined) return { ok: true, state: cached }
     const bytes = encoder.encode(name)
     // 先頭の 4 バイトを結果、その後ろを名前にする。番地は 8 バイトに揃う。
-    const base = this.#core.scratch(4 + bytes.length)
+    const base = this.#core.scratch(4 + bytes.length, 'resolve')
     new Uint8Array(this.#core.buffer, base + 4, bytes.length).set(bytes)
     const status = this.#core.call('resolve', x => x.rse_resolve(base + 4, bytes.length, base)) >>> 0
     if (status !== 0) return { ok: false, status }
@@ -224,6 +240,9 @@ export async function loadEngineFromUrls(wasmUrl: string | URL, statesUrl: strin
     .catch((e: unknown) => {
       throw new Error(`状態表の JSON が読めない: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
     })
-  const [wasm, table] = await Promise.all([fetch(wasmUrl), states])
-  return Engine.load(wasm, table)
+  const wasm = fetch(wasmUrl).catch((e: unknown) => {
+    throw new Error(`wasm を取れない: ${e instanceof Error ? e.message : String(e)}`, { cause: e })
+  })
+  const [response, table] = await Promise.all([wasm, states])
+  return Engine.load(response, table)
 }

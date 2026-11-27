@@ -57,7 +57,8 @@ pub extern "C" fn rse_resolve(ptr: *const u8, len: u32, out: *mut u32) -> u32 {
 /// `recs..recs + 16n` は作業領域の内で、4 バイトに揃うこと (外なら ARGUMENT)。
 /// `mode` は `load_mode`。SETTLED は更新を出さずに置く (19 §4.2 の「そのまま」)。REBUILD は席だけで
 /// UNIMPLEMENTED を返す。StateId が表の外 (ARGUMENT) か、高さの外・格子の枠の外 (OUT_OF_WORLD) のマスが
-/// あれば、1 つも置かない (格子の枠は置いてみて分かるので、置いた分を戻す)。置いたマスは変化の列に載る。
+/// あれば、1 つも置かない (置く前に、今の格子と列を合わせて枠に収まるかを rse-core で確かめる。格子も広げない)。
+/// 置いたマスは変化の列に載る。
 #[unsafe(no_mangle)]
 pub extern "C" fn rse_load(handle: u32, recs: *const CellRec, n: u32, mode: u32) -> u32 {
     with(|r| r.load(handle, recs.addr(), n, mode))

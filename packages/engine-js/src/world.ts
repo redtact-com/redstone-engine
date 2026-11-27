@@ -126,7 +126,7 @@ export class RustWorld {
     // 線形メモリの上の配列は、作業領域を広げると切り離されうるので、先に写す。
     if (words.buffer === this.#core.buffer) words = words.slice()
     const n = words.length / CELL_WORDS
-    const base = this.#core.scratch(n * CELL_BYTES)
+    const base = this.#core.scratch(n * CELL_BYTES, 'load')
     new Int32Array(this.#core.buffer, base, words.length).set(words)
     return this.#check('load', this.#core.call('load', x => x.rse_load(this.#handle, base, n, code)))
   }
@@ -164,7 +164,7 @@ export class RustWorld {
    */
   changes(): ChangeWindow {
     this.#live('changes')
-    const lenOut = this.#core.scratch(4)
+    const lenOut = this.#core.scratch(4, 'changes')
     const ptr = this.#core.call('changes', x => x.rse_changes(this.#handle, lenOut)) >>> 0
     // 件数の書き先は作業領域から取ったので、null はハンドルが無い時だけ (変化は取り出されていない)。
     if (ptr === 0) throw new EngineError('changes', ABI_STATUS.HANDLE)
@@ -207,9 +207,12 @@ export class ChangeWindow {
     this.count = count
   }
 
-  /** まだ読めるか (この後に窓口を呼んでいないか) */
+  /**
+   * まだ読めるか。この後に窓口を呼んでいず、線形メモリも入れ替わっていない (伸びていない) こと。
+   * epoch に頼らず buffer も比べるので、外から `memory.grow` を呼んで切り離された時も読まずに断る。
+   */
   get valid(): boolean {
-    return this.#core.epoch === this.#epoch
+    return this.#core.epoch === this.#epoch && this.#data.buffer === this.#core.buffer
   }
 
   #live(): Int32Array {

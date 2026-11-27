@@ -1,6 +1,7 @@
 /**
- * Node で、ファイルから読む (vitest・道具・束ねる道具の中など、Node で動く所で使う)。
- * node:fs を使うので、ブラウザの束には入れない (`@redstone-engine/engine-js/node` の入口)。
+ * Node で、ファイルから読む (`@redstone-engine/engine-js/node` の入口)。vitest や束ねる道具 (Vite ほか) の中で読む。
+ * パッケージの exports が .ts を指し、import に拡張子が無いので、素の node では読めない。
+ * node:fs を使うので、ブラウザの束には入れない。
  *
  * 既定の場所は、このパッケージの generated/ (`npm run build:engine` が wasm と状態表の JSON を置く。追跡しない)。
  */

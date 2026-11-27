@@ -101,6 +101,19 @@ describe('wasm の読み込み', () => {
     expect(plain.states.size).toBe(engine.states.size)
   })
 
+  // 1 つのインスタンスから Engine を 2 つ作ると epoch が分かれ、片方で線形メモリが伸びても、もう片方の窓が古いと分からない。
+  it('同じインスタンスから 2 つ目の Engine は作れない', () => {
+    const exports = new WebAssembly.Instance(new WebAssembly.Module(WASM), {}).exports
+    const broken = JSON.parse(STATES)
+    broken.blocks[4].defaultState = broken.blocks[4].firstState
+    // 確かめで断られた時は覚えないので、JSON を直して同じインスタンスで作り直せる。
+    expect(() => Engine.fromExports(exports, broken)).toThrow('状態表の JSON が wasm と合わない')
+    const first = Engine.fromExports(exports, STATES)
+    expect(first.resolve('stone')).toBe(1)
+    expect(() => Engine.fromExports(exports, STATES)).toThrow('もう Engine がある')
+    expect(() => Engine.fromExports({ ...exports }, STATES)).toThrow('もう Engine がある')
+  })
+
   // 版の違う wasm は関数の顔ぶれも違いうるので、関数の有無より先に版を見る。
   it('版を先に確かめる', () => {
     const memory = new WebAssembly.Memory({ initial: 1 })
@@ -141,6 +154,8 @@ describe('wasm の読み込み', () => {
         if (req.url === '/rse_wasm.wasm') send(200, 'application/wasm', WASM)
         else if (req.url === '/states.json') send(200, 'application/json', STATES)
         else if (req.url === '/broken.json') send(200, 'application/json', '{')
+        // 少し待ってから、返事をせずに接続を切る (fetch そのものが reject する)。
+        else if (req.url === '/cut.wasm') setTimeout(() => req.socket.destroy(), 100)
         else send(404, 'text/plain', 'no')
       })
       await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
@@ -159,6 +174,44 @@ describe('wasm の読み込み', () => {
       await expect(loadEngineFromUrls(`${base}/missing.wasm`, `${base}/states.json`)).rejects.toThrow('wasm を取れない: 404')
       // 両方とも失敗しても、1 つにまとまる。
       await expect(loadEngineFromUrls(`${base}/missing.wasm`, `${base}/broken.json`)).rejects.toThrow()
+    })
+
+    /** `f` を待つ間と、その後しばらくの間に起きた、取り残しの reject (unhandled rejection) を集める */
+    async function unhandledDuring(f: () => Promise<unknown>): Promise<unknown[]> {
+      const seen: unknown[] = []
+      const listen = (reason: unknown) => seen.push(reason)
+      process.on('unhandledRejection', listen)
+      try {
+        await f()
+        await new Promise(done => setTimeout(done, 300))
+      } finally {
+        process.off('unhandledRejection', listen)
+      }
+      return seen
+    }
+
+    // wasm の取得そのもの (fetch) が reject する形と、壊れた状態表の JSON を組み合わせる。
+    // 片方だけを待つ作りだと、先に断った後でもう片方の reject が取り残される。
+    it('wasm の取得が reject しても、壊れた JSON と一緒に待って取り残さない', async () => {
+      const closed = await new Promise<string>(done => {
+        const s = createServer()
+        s.listen(0, '127.0.0.1', () => {
+          const port = (s.address() as AddressInfo).port
+          s.close(() => done(`http://127.0.0.1:${port}`))
+        })
+      })
+      // 閉じた口 (すぐ reject) と壊れた JSON。
+      const fast = await unhandledDuring(() =>
+        expect(loadEngineFromUrls(`${closed}/rse_wasm.wasm`, `${base}/broken.json`)).rejects.toThrow(/wasm を取れない|状態表の JSON が読めない/),
+      )
+      expect(fast).toEqual([])
+      // 壊れた JSON が先に断られ、wasm の取得が後で reject する形。
+      const late = await unhandledDuring(() =>
+        expect(loadEngineFromUrls(`${base}/cut.wasm`, `${base}/broken.json`)).rejects.toThrow('状態表の JSON が読めない'),
+      )
+      expect(late).toEqual([])
+      // wasm の取得だけが reject する時は、その旨の文で断る。
+      await expect(loadEngineFromUrls(`${closed}/rse_wasm.wasm`, `${base}/states.json`)).rejects.toThrow('wasm を取れない')
     })
   })
 
@@ -371,6 +424,20 @@ describe('変化の窓と線形メモリ', () => {
     world.dispose()
   })
 
+  // 窓は epoch に頼らず、配列の buffer が今の memory.buffer かも見る。外から memory.grow を呼んで切り離されても、読まずに断る。
+  it('窓口を通さずに線形メモリが伸びても、古い窓は読まずに断る', () => {
+    const world = engine.createWorld()
+    world.load(circuit())
+    const w = world.changes()
+    const epoch = engine.epoch
+    engine.memory.grow(1)
+    expect(engine.epoch).toBe(epoch)
+    expect(w.valid).toBe(false)
+    expect(() => w.x(0)).toThrow('変化の窓は')
+    expect(() => w.data).toThrow('変化の窓は')
+    world.dispose()
+  })
+
   // 呼び出しと呼び出しの間で伸びる形: 前の ArrayBuffer は切り離される。呼んだ後に作り直した窓で読める。
   it('呼び出しの間に線形メモリが伸びても、作り直した窓で読める', () => {
     const world = engine.createWorld()
@@ -455,7 +522,11 @@ describe('安全網と trap', () => {
     expect(() => e.createWorld()).toThrow('Engine ごと捨てて読み直す')
     expect(calls).toBe(before)
     expect(() => e.resolve('redstone_lamp[lit=true]')).toThrow(EngineStoppedError)
-    expect(() => world.changes()).toThrow(EngineStoppedError)
+    // 文の頭は呼んだ操作の名前 (内部の scratch ではない)。
+    expect(() => world.changes()).toThrow(/^changes: .*Engine ごと捨てて読み直す/)
+    expect(() => world.load([])).toThrow(/^load: /)
+    expect(() => world.step()).toThrow(/^step: /)
+    expect(() => e.resolve('lever')).toThrow(/^resolve: /)
     // dispose は投げない (finally の中で、元の例外を隠さない)。安全網も呼ばない。
     expect(() => world.dispose()).not.toThrow()
     const core = new Core(patchedExports(() => ({})) as unknown as RseExports)
@@ -470,5 +541,20 @@ describe('安全網と trap', () => {
     const epoch = core.epoch
     releaseLeaked({ core, handle })
     expect(core.epoch).toBe(epoch)
+  })
+
+  // 安全網の中で trap が起きても、回収の時に投げない (受ける人がいない)。Engine は止まった状態になる。
+  it('安全網の中の trap は投げず、Engine を止める', () => {
+    const core = new Core(
+      patchedExports(() => ({
+        rse_world_free: () => {
+          throw new WebAssembly.RuntimeError('unreachable')
+        },
+      })) as unknown as RseExports,
+    )
+    const handle = core.call('new', x => x.rse_world_new())
+    expect(() => releaseLeaked({ core, handle })).not.toThrow()
+    expect(core.stopped).toBe(true)
+    expect(() => core.call('step', x => x.rse_step(handle, 1))).toThrow(EngineStoppedError)
   })
 })

@@ -96,6 +96,12 @@ impl<R: Rules> Level<R> {
         self.world.set(pos, state).is_some()
     }
 
+    /// `cells` を全部、更新を出さずに置けるか (高さの内・格子の枠の内)。何も書かない。
+    /// 読み込みを全部か無しかにするために、置く前に確かめる ([`World::can_set_all`])。
+    pub fn can_set_all_raw(&self, cells: impl IntoIterator<Item = (Pos, StateId)>) -> bool {
+        self.world.can_set_all(cells)
+    }
+
     /// 書ける高さの内か。
     #[inline]
     pub fn in_bounds(&self, pos: Pos) -> bool {

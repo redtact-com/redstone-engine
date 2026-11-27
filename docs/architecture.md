@@ -26,11 +26,13 @@
 
 ```
 rse-java → rse-core → rse-blocks-*  ┐
-                    └──────────────→ rse-engine → rse-wasm → engine-js ┐
-                                                 → rse-cli               ├→ apps/web
-                                     board → view-3d ───────────────────┘
+                    └──────────────→ rse-engine → rse-wasm ─── wasm ───┐
+                                                 → rse-cli ─── JSON ───┴→ engine-js ┐
+                                                                                    ├→ apps/web
+                                     board → view-3d ───────────────────────────────┘
 ```
 
+- rse-wasm → engine-js は wasm、rse-cli → engine-js は状態表の JSON (どちらもビルドの時に作る生成物。docs/wasm-abi.md §6・§7)。
 - 矢印の逆向きの依存を作らない。
 - **族どうしは依存しない**。族の間のやり取り (ダストが何に繋がるか・何が信号を出すか・導体か) は、状態表の性質のビットで引く。
 - 画面の機能のパッケージどうしも依存しない。共有する型は board に置く。

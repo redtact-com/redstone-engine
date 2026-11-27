@@ -310,8 +310,7 @@ fn load_refuses_bad_cells_before_placing_any() {
     assert_eq!(load(h, &[ok], load_mode::REBUILD), Status::UNIMPLEMENTED.0);
     assert_eq!(load(h, &[ok], 2), status::ARGUMENT);
     assert_eq!(changes(h).unwrap(), []);
-    // 格子の枠 (離れすぎた 2 点) は置いてみるまで分からない。置けなかったら、前に置いたマスを戻す
-    // (全部か無しか)。前からあったマスも、同じ列で書き換えた分は前の状態に戻る。
+    // 格子の枠 (今の格子と列を合わせて 1 辺 256 セクション) も、置く前に確かめて 1 つも書かない。
     let lamp = CellRec {
         state: id("redstone_lamp"),
         ..ok
@@ -325,6 +324,31 @@ fn load_refuses_bad_cells_before_placing_any() {
     let ok_far = CellRec { x: 16 * 255, ..ok };
     assert_eq!(load(h, &[next, ok_far], 0), 0);
     assert_eq!(changes(h).unwrap(), [next, ok_far]);
+    assert_eq!(rse_world_free(h), 0);
+}
+
+// 断った読み込みは、格子の広がりも残さない。何も無い世界で通る読み込みは、断られた後でも通る。
+// (置いてから戻す形では、断った読み込みが 0〜255 セクションまで格子を広げたまま残り、後の -10 が枠を超えた。)
+#[test]
+fn refused_load_leaves_no_grid_behind() {
+    let h = rse_world_new();
+    let stone = id("stone");
+    let at = |x: i32| CellRec {
+        x,
+        y: 0,
+        z: 0,
+        state: stone,
+    };
+    assert_eq!(
+        load(h, &[at(0), at(16 * 255), at(16 * 300)], 0),
+        status::OUT_OF_WORLD
+    );
+    assert_eq!(changes(h).unwrap(), []);
+    assert_eq!(load(h, &[at(-16 * 10)], 0), 0);
+    assert_eq!(changes(h).unwrap(), [at(-16 * 10)]);
+    // 今の格子 (-10 のセクション) と合わせて枠を超える列も、1 つも書かずに断る。
+    assert_eq!(load(h, &[at(0), at(16 * 246)], 0), status::OUT_OF_WORLD);
+    assert_eq!(load(h, &[at(0), at(16 * 245)], 0), 0);
     assert_eq!(rse_world_free(h), 0);
 }
 

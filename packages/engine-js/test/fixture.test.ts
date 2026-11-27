@@ -73,7 +73,8 @@ describe('fixture を wasm で回す', () => {
     expect(run.stdout.trimEnd().split('\n')).toEqual(wasm)
   })
 
-  // 合わない時も、報告の全文 (不一致のマスと状態コードの行) が native と同じになる。
+  // 合わない時も、報告の全文 (不一致の見出しと不一致の行) が native と同じになる。
+  // 状態コードの行は、今の 2 本の回路では立たないので比べていない (状態コードを立てる fixture が入ったら足す)。
   it('合わない fixture でも native と同じ報告になる', () => {
     const json = JSON.parse(LAMP_OFF_DELAY)
     json.expect = json.expect.filter((e: { tick: number }) => e.tick !== 14)

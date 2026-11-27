@@ -109,6 +109,136 @@ describe('著作権まわりの衛生 (docs/ip-policy.md)', () => {
   })
 })
 
+/** unsafe の置き場 (#9) */
+const UNSAFE = {
+  scratch: 'crates/rse-wasm/src/scratch.rs',
+  exports: 'crates/rse-wasm/src/exports.rs',
+  wasmRoot: 'crates/rse-wasm/src/lib.rs',
+}
+
+/**
+ * Rust の文から、注 (行・塊・入れ子)・文字列 (生の文字列も)・文字の字面を空白に置き換える。改行は残すので行の番号は変わらない。
+ * unsafe の見張りは、この「文だけ」の字面に当てる (注や文字列の中の unsafe は拾わず、複数行の文は丸ごと見る)。
+ */
+function rustCode(text: string): string {
+  const blank = (t: string) => t.replace(/[^\n]/g, ' ')
+  const raw = /b?r(#*)"/y
+  const char = /'(\\u\{[0-9a-fA-F]+\}|\\.|[^\\'\n])'/y
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const two = text.slice(i, i + 2)
+    let end = -1
+    if (two === '//') {
+      end = text.indexOf('\n', i)
+      if (end < 0) end = text.length
+    } else if (two === '/*') {
+      let depth = 1
+      end = i + 2
+      while (end < text.length && depth > 0) {
+        const t = text.slice(end, end + 2)
+        if (t === '/*') (depth++, (end += 2))
+        else if (t === '*/') (depth--, (end += 2))
+        else end++
+      }
+    } else if (!/\w/.test(text[i - 1] ?? '') && ((raw.lastIndex = i), raw.test(text))) {
+      raw.lastIndex = i
+      const m = raw.exec(text) as RegExpExecArray
+      const close = text.indexOf(`"${m[1]}`, i + m[0].length)
+      end = close < 0 ? text.length : close + 1 + m[1].length
+    } else if (text[i] === '"') {
+      end = i + 1
+      while (end < text.length && text[end] !== '"') end += text[end] === '\\' ? 2 : 1
+      end++
+    } else if (text[i] === "'" && ((char.lastIndex = i), char.test(text))) {
+      end = char.lastIndex
+    }
+    if (end > i) {
+      out += blank(text.slice(i, end))
+      i = end
+    } else {
+      out += text[i]
+      i++
+    }
+  }
+  return out
+}
+
+/** rustdoc が Rust として組む囲みの言葉 (`,` か空白で区切った全部がこれなら doctest) */
+const RUSTDOC_WORD = /^(rust|ignore|should_panic|no_run|compile_fail|standalone_crate|test_harness|edition\d{4}|ignore-[\w-]+|E\d{4})$/
+
+/**
+ * 注の中の doctest の行を返す。`///` と `//!` の続きを 1 つの塊として、囲み (``` か ~~~ を 3 つ以上。言葉が無いか、
+ * 言葉が全部 rustdoc の印) と、空の行の後の 4 字以上の字下げのコードを拾う。#[doc = "…"] の形は拾わない。
+ */
+function doctestLines(text: string): number[] {
+  const out: number[] = []
+  let fence: { mark: string; size: number } | null = null
+  let prevBlank = true
+  text.split('\n').forEach((line, i) => {
+    const doc = /^\s*\/\/[/!](?![/!])(.*)$/.exec(line)
+    if (!doc) {
+      fence = null
+      prevBlank = true
+      return
+    }
+    const body = doc[1].replace(/^ /, '')
+    const open = /^ {0,3}(`{3,}|~{3,})\s*(.*)$/.exec(body)
+    if (fence) {
+      const f = fence as { mark: string; size: number }
+      if (open && open[1][0] === f.mark && open[1].length >= f.size && open[2] === '') fence = null
+      return
+    }
+    if (open) {
+      const words = open[2].split(/[\s,]+/).filter(Boolean)
+      if (words.every(w => RUSTDOC_WORD.test(w))) out.push(i + 1)
+      fence = { mark: open[1][0], size: open[1].length }
+      prevBlank = false
+      return
+    }
+    if (prevBlank && /^( {4}|\t)\s*\S/.test(body)) out.push(i + 1)
+    prevBlank = body.trim() === ''
+  })
+  return out
+}
+
+/** crates の .rs の、unsafe の置き場の決まりに外れた所 */
+function unsafeHits(files: { path: string; text: string }[]): string[] {
+  const hits: string[] = []
+  for (const { path, text } of files) {
+    const code = rustCode(text)
+    const lines = code.split('\n')
+    if (/^crates\/[^/]+\/src\/(lib|main)\.rs$/.test(path)) {
+      if (path === UNSAFE.wasmRoot) {
+        if (!/^#!\[deny\(unsafe_code\)\]\s*$/m.test(code)) hits.push(`${path}: #![deny(unsafe_code)] が無い`)
+      } else if (!path.startsWith('crates/rse-wasm/') && !/^#!\[forbid\(unsafe_code\)\]\s*$/m.test(code)) {
+        hits.push(`${path}: #![forbid(unsafe_code)] が無い`)
+      }
+    }
+    lines.forEach((line, i) => {
+      for (const m of line.matchAll(/\bunsafe\b/g)) {
+        const attr = /^\s*\(/.test(line.slice((m.index ?? 0) + m[0].length))
+        // scratch.rs は unsafe のブロックの置き場。exports.rs は unsafe の属性 (#[unsafe(no_mangle)]) だけ
+        if (path === UNSAFE.scratch || (path === UNSAFE.exports && attr)) continue
+        hits.push(`${path}:${i + 1} unsafe: ${line.trim()}`)
+      }
+    })
+    if (path !== UNSAFE.scratch && path !== UNSAFE.exports) {
+      // 文の全体に当てる (rustfmt が折った複数行の属性も拾う)
+      for (const m of code.matchAll(/\b(allow|expect|warn)\s*\(([^()]*)\)/g)) {
+        if (/\bunsafe_code\b/.test(m[2])) {
+          const at = code.slice(0, m.index).split('\n').length
+          hits.push(`${path}:${at} unsafe_code を許している: ${m[0].replace(/\s+/g, ' ')}`)
+        }
+      }
+    }
+    for (const at of doctestLines(text)) {
+      hits.push(`${path}:${at} doctest がある (forbid が効かないので、先に #![doc(test(attr(forbid(unsafe_code))))] を付ける)`)
+    }
+  }
+  return hits
+}
+
 describe('Rust の依存の見張り (19 §9.3)', () => {
   /** rse-* 以外で使ってよい外部の crate。足す時は PR で理由を書く */
   const ALLOWED_EXTERNAL: string[] = [
@@ -152,44 +282,46 @@ describe('Rust の依存の見張り (19 §9.3)', () => {
 
   // CLAUDE.md の「unsafe は rse-wasm だけ」。rse-wasm の中でも、unsafe のブロックは作業領域の読み書き
   // (scratch.rs) だけに置き、unsafe の属性 (no_mangle) は書き出しの関数 (exports.rs) だけに置く (#9)。
-  // unsafe_code を許す (allow・expect) のもこの 2 つだけで、rse-wasm の lib.rs は crate 全体で deny する。
-  // doctest の中の unsafe は crate の forbid が効かない。今の crate に doctest は無い (doc(test(attr(…))) は後で)
+  // unsafe_code を許す (allow・expect・warn) のもこの 2 つだけで、rse-wasm の lib.rs は crate 全体で deny する。
+  // doctest の中の unsafe は crate の forbid が効かないので、doctest があれば落とす (doc(test(attr(…))) を付けるまで)
   it('unsafe は rse-wasm の決めたファイルだけで、ほかの crate は forbid(unsafe_code)', () => {
-    const SCRATCH = 'crates/rse-wasm/src/scratch.rs'
-    const EXPORTS = 'crates/rse-wasm/src/exports.rs'
-    const WASM_ROOT = 'crates/rse-wasm/src/lib.rs'
-    const hits: string[] = []
-    const roots = tracked().filter(f => /^crates\/[^/]+\/src\/(lib|main)\.rs$/.test(f))
-    for (const f of roots.filter(f => !f.startsWith('crates/rse-wasm/'))) {
-      if (!/^#!\[forbid\(unsafe_code\)\]$/m.test(readText(f) ?? '')) hits.push(`${f}: #![forbid(unsafe_code)] が無い`)
+    const files = tracked()
+      .filter(f => f.startsWith('crates/') && f.endsWith('.rs'))
+      .map(path => ({ path, text: readText(path) ?? '' }))
+    const hits = unsafeHits(files)
+    expect(hits, `unsafe の置き場は ${UNSAFE.scratch} (ブロック) と ${UNSAFE.exports} (no_mangle) だけ\n${hits.join('\n')}`).toEqual([])
+  })
+
+  // 見張りそのものの確かめ: すり抜けた形 (2 回目の見直し) を拾い、注と文字列の中は拾わない
+  it('unsafe の見張りは、複数行の allow・macro の引数・cfg_attr・いろいろな doctest の囲みを拾う', () => {
+    const other = 'crates/rse-core/src/x.rs'
+    const hitsOf = (path: string, text: string) => unsafeHits([{ path, text }])
+    // 拾う
+    expect(hitsOf(other, '#![allow(\n    dead_code,\n    unsafe_code\n)]\n')).toHaveLength(1)
+    expect(hitsOf(other, 'm!(unsafe);\n')).toHaveLength(1)
+    expect(hitsOf(other, '#[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]\n')).toHaveLength(1)
+    expect(hitsOf(UNSAFE.exports, 'fn f() { unsafe { g() } }\n')).toHaveLength(1)
+    for (const doc of [
+      '/// ```\n/// x\n/// ```\n',
+      '/// ```rust,no_run\n/// x\n/// ```\n',
+      '//! ```edition2024\n//! x\n//! ```\n',
+      '/// ````\n/// x\n/// ````\n',
+      '/// ~~~\n/// x\n/// ~~~\n',
+      '/// 説明。\n///\n///     let x = 1;\n',
+    ]) {
+      expect(hitsOf(other, doc), doc).toHaveLength(1)
     }
-    if (!/^#!\[deny\(unsafe_code\)\]$/m.test(readText(WASM_ROOT) ?? '')) hits.push(`${WASM_ROOT}: #![deny(unsafe_code)] が無い`)
-    for (const f of tracked().filter(f => f.startsWith('crates/') && f.endsWith('.rs'))) {
-      const text = readText(f) ?? ''
-      text.split('\n').forEach((line, i) => {
-        const t = line.trim()
-        if (t.startsWith('//')) return
-        if (/\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)/.test(t) && f !== SCRATCH) hits.push(`${f}:${i + 1} unsafe のブロック・関数: ${t}`)
-        // #[unsafe(…)] も #[cfg_attr(…, unsafe(…))] も拾う
-        if (/\bunsafe\s*\(/.test(t) && f !== EXPORTS) hits.push(`${f}:${i + 1} unsafe の属性: ${t}`)
-        if (/\b(allow|expect|warn)\s*\([^)]*\bunsafe_code\b/.test(t) && f !== SCRATCH && f !== EXPORTS) {
-          hits.push(`${f}:${i + 1} unsafe_code を許している: ${t}`)
-        }
-        // doctest の中 (/// や //! の後ろ) の unsafe は、上の行の判定で読み飛ばしている。doctest を足す時は crate に
-        // #![doc(test(attr(forbid(unsafe_code))))] を付ける
-      })
-      // 注の中のコードの囲み (```) を開きと閉じで数え、Rust として回る開き (言葉なし・rust ほか) を拾う
-      let open = false
-      for (const [i, line] of text.split('\n').entries()) {
-        const fence = /^\s*\/\/[/!]\s*```\s*([\w,-]*)\s*$/.exec(line)
-        if (!fence) continue
-        if (!open && /^(rust|should_panic|no_run|compile_fail)?$/.test(fence[1])) {
-          hits.push(`${f}:${i + 1} doctest がある (forbid が効かないので、先に doc(test(attr(forbid(unsafe_code)))) を付ける)`)
-        }
-        open = !open
-      }
-    }
-    expect(hits, `unsafe の置き場は ${SCRATCH} (ブロック) と ${EXPORTS} (no_mangle) だけ\n${hits.join('\n')}`).toEqual([])
+    // 拾わない
+    expect(hitsOf(other, '// unsafe { x }\n/* unsafe { */\nlet s = "unsafe { }"; let r = r#"unsafe(x)"#;\n')).toEqual([])
+    expect(hitsOf(other, '/// ```text\n/// unsafe { }\n/// ```\n')).toEqual([])
+    // 文字の字面の " は文字列を開かない (開くと、後ろの unsafe を読み飛ばす)。lifetime の ' も同じ
+    expect(hitsOf(other, "fn f<'a>(x: &'a u8) -> char { '\"' } m!(unsafe);\n")).toHaveLength(1)
+    expect(hitsOf(UNSAFE.scratch, 'fn f() { unsafe { g() } }\n#![allow(unsafe_code)]\n')).toEqual([])
+    expect(hitsOf(UNSAFE.exports, '#![allow(unsafe_code)]\n#[unsafe(no_mangle)]\npub extern "C" fn f() {}\n')).toEqual([])
+    // 置き場の決まり: ほかの crate の lib.rs には forbid、rse-wasm の lib.rs には deny が要る
+    expect(hitsOf('crates/rse-core/src/lib.rs', '// #![forbid(unsafe_code)]\n')).toHaveLength(1)
+    expect(hitsOf('crates/rse-core/src/lib.rs', '#![forbid(unsafe_code)]\n')).toEqual([])
+    expect(hitsOf(UNSAFE.wasmRoot, '#![allow(unsafe_code)]\n')).toHaveLength(2)
   })
 
   it('include_bytes / include_str は決めたフォルダ (crates/*/data・conformance) の物だけ読む', () => {

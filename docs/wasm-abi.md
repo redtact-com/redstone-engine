@@ -39,8 +39,8 @@
 - `rse_resolve` は世界に依らないので、ハンドルを取らない。名前の形は rse-core の `StateId::parse` のとおり
   (先頭の `minecraft:` は読み飛ばし、書いていないプロパティは既定の値)。失敗した時は `out` に書かない。
 - `rse_load` は、StateId が表の外 (ARGUMENT) か、高さの外・格子の枠の外 (OUT_OF_WORLD) のマスがあれば、**1 つも置かない**。
-  格子の枠 (離れすぎた 2 点) は置いてみるまで分からないので、置けなかったら置いた分を逆の順に前の状態へ戻す
-  (書いて戻したマスは正味の変化にならない)。置いたマスは変化の列に載る。
+  格子の枠は、置く前に rse-core (`Level::can_set_all_raw`) で、今の格子と列の座標を合わせた箱が 1 辺 256 セクションに収まるかを確かめる
+  (空気のマスは格子を広げないので数えない)。断った読み込みは、マスの状態も、格子の広がりもセクションも残さない。置いたマスは変化の列に載る。
 - `rse_input`: 使う入力の `arg` が 0 でない時、setblock の StateId が表の外か、ビット 17 以上が立っている時は ARGUMENT。
   区間の印は順を変えない (呼んだ順に適用する)。受け付けたか (accepted) は返さない。変わったマスは変化の列で分かる。
 - `rse_changes` は、前に取り出した後の正味の変化 (19 §3.8) を取り出す。`len_out` が作業領域の外なら、変化を取り出さずに 0 を返す
@@ -116,8 +116,11 @@
 - **型付き配列の窓は、窓口を呼んだ後に作り直す**。`rse_abi_version` と `rse_resolve` のほかは全部、割り当てで線形メモリを
   伸ばしうる (`rse_world_free` も、空いた席の一覧を伸ばす)。伸びると前の ArrayBuffer は切り離される (長さ 0)。
   engine-js は呼ぶたびに `memory.buffer` から窓を作り、次に呼ぶ前に使い終える。
-- engine-js は窓口の関数を全部 1 つの口 (Core) から呼び、呼んだ回数 (epoch) を数える。
+- engine-js は窓口の関数を全部 1 つの口 (Core) から呼び、呼んだ回数 (epoch) を数える。1 つのインスタンス (線形メモリ) から作れる
+  Engine は 1 つだけ (`Engine.fromExports` に同じ書き出しを 2 回渡すと断る)。2 つあると epoch が分かれ、片方で線形メモリが伸びても、
+  もう片方の窓が古いと分からないため。
 - 変化の窓 (`ChangeWindow`) は線形メモリそのもので、写しを作らない。次に窓口を呼んだ後に窓を読むと例外にする。
+  epoch に頼らず、窓の配列の buffer が今の `memory.buffer` かも比べるので、外から `memory.grow` を呼んで切り離された時も読まずに断る。
   続けて使う値は、その前に読み出す。`data` は読むだけにし、持ち続けない。窓は自分の世界を持つので、窓が生きている間は
   世界が回収されない。添字が件数の外なら `RangeError`。
 - 線形メモリの上の配列 (変化の窓の `data` など) を `load` に渡すと、作業領域を広げる前に写してから使う。
@@ -127,7 +130,8 @@
 - **trap はインスタンスが壊れた印で、Engine ごと捨てて読み直す**。release は panic = abort なので、wasm の中の panic
   (今の経路では割り当ての失敗) は trap (WebAssembly.RuntimeError) になり、その後は中の表の借用が戻らず、どの関数も trap し続ける。
   engine-js は trap を受けたら Engine を止まった状態 (`stopped`) にし、以後は wasm を呼ばずに `EngineStoppedError` を投げる。
-  止まった Engine では、`dispose` は投げずに終え (finally の中で元の例外を隠さない)、安全網も呼ばない。
+  例外の文の頭は、呼んだ操作の名前 (`load`・`changes`・`resolve` ほか)。止まった Engine では、`dispose` は投げずに終え
+  (finally の中で元の例外を隠さない)、安全網も呼ばない。安全網の中で trap が起きた時も、投げずに Engine を止める。
 - SharedArrayBuffer と Worker は使わない (19 §11 の 14)。
 
 ## 5. unsafe の置き場
@@ -137,9 +141,14 @@
 - JS から来た番地は数としてだけ使い、作業領域の内かを確かめてから、作業領域の Vec 自身のポインタに位置を足して読み書きする。
   テストの読み書きも同じ確かめを通す (変化の列は、返した番地と件数がその世界の列そのものかを確かめてから写す)。
 - `#[unsafe(no_mangle)]` は crates/rse-wasm/src/exports.rs だけ。unsafe_code を許すのは scratch.rs と exports.rs だけで、
-  rse-wasm の lib.rs は crate 全体で deny する。ほかの crate は `#![forbid(unsafe_code)]`。tools/ip-hygiene.test.ts がこの置き場を見張る
-  (`cfg_attr` の中の unsafe の属性も拾う)。doctest の中には crate の forbid が効かないので、doctest を足す時は先に
-  `#![doc(test(attr(forbid(unsafe_code))))]` を付ける (今は doctest が無く、在れば同じ検査が落ちる)。
+  rse-wasm の lib.rs は crate 全体で deny する。ほかの crate は `#![forbid(unsafe_code)]`。
+- tools/ip-hygiene.test.ts がこの置き場を見張る。注・文字列・文字の字面を外した文に当て、`unsafe` の字 (ブロック・関数・
+  `cfg_attr` の中の属性・macro の引数) は scratch.rs (と exports.rs の属性) の外に 1 つも無いこと、`allow` / `expect` / `warn` の
+  `unsafe_code` は、rustfmt が折った複数行の属性も含めて scratch.rs と exports.rs の外に無いことを見る。見張り自身のテストもある。
+- doctest の中には crate の forbid が効かないので、doctest を足す時は先に `#![doc(test(attr(forbid(unsafe_code))))]` を付ける。
+  今は doctest が無く、同じ検査が、`///`・`//!` の中の囲み (``` か ~~~ を 3 つ以上。言葉が無いか、`,` と空白で割った言葉が全部
+  rustdoc の印 (rust・no_run・edition2024 ほか)) と、空の行の後の 4 字以上の字下げのコードを doctest として落とす。
+  `#[doc = "…"]` の形の doctest は拾わない。
 - rse-wasm は std のまま組む。割り当て器 (std の dlmalloc) と、世界の表を持つ thread_local を std から借りる。
   no_std にすると、割り当て器を自分で書く (unsafe が増える) か、外部の crate を足すことになる。
 
@@ -165,7 +174,7 @@ rse-cli の `rse states <ファイル>` が書き出す (crates/rse-cli/src/stat
 | 場面 | やり方 |
 |---|---|
 | 作る | `npm run build:engine` (packages/engine-js/scripts/build.mjs)。cargo で wasm を組み、rse-cli で状態表の JSON を書き、どちらも packages/engine-js/generated/ に置く。target の場所は `cargo metadata` に聞く。`npm test` の前 (pretest) にも毎回走るので、テストが古い wasm で回らない |
-| Node | `@redstone-engine/engine-js/node` の `loadEngineFromFiles(dir?)`。vitest・道具・束ねる道具の中など、Node で動く所で使う入口で、ブラウザの束には入れない (node:fs を使う)。既定で generated/ から読む。`dir` は URL かファイルの道筋で、末尾の `/` は無くてよい |
-| ブラウザ | `loadEngineFromUrls(wasmUrl, statesUrl)`。2 つを同時に取って両方を待つ。wasm は `instantiateStreaming` で読む (MIME 型が違えばバイト列で読み直す)。URL はアプリが決める |
+| Node | `@redstone-engine/engine-js/node` の `loadEngineFromFiles(dir?)`。vitest や束ねる道具 (Vite ほか) の中で読む入口で、素の node では読めない (パッケージの exports が .ts を指し、import に拡張子が無い)。node:fs を使うので、ブラウザの束には入れない。既定で generated/ から読む。`dir` は URL かファイルの道筋で、末尾の `/` は無くてよい |
+| ブラウザ | `loadEngineFromUrls(wasmUrl, statesUrl)`。2 つを同時に取って両方を待つ (片方の失敗で、もう片方の reject を取り残さない。失敗は「wasm を取れない」「状態表の JSON が読めない」で包む)。wasm は `instantiateStreaming` で読む (MIME 型が違えばバイト列で読み直す)。URL はアプリが決める |
 | どちらでも | `Engine.load(bytes か Module か Response, 状態表の JSON)`。インスタンスを自分で作ったら `Engine.fromExports(exports, 状態表の JSON)` |
 | CI | js の job で Rust の toolchain を入れ、`npm test` (pretest で wasm と JSON を作る) と `npm run size` (大きさの報告。合否にしない) を回す |
