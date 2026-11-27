@@ -111,7 +111,16 @@ describe('著作権まわりの衛生 (docs/ip-policy.md)', () => {
 
 describe('Rust の依存の見張り (19 §9.3)', () => {
   /** rse-* 以外で使ってよい外部の crate。足す時は PR で理由を書く */
-  const ALLOWED_EXTERNAL: string[] = []
+  const ALLOWED_EXTERNAL: string[] = [
+    // rse-cli が fixture の JSON を読むのに使う (#5)。エンジンの crate (rse-cli 以外) には入れない。
+    // 下のテスト「エンジンの crate は外部の依存を持たない」が、それを見張る
+    'serde_json',
+    // serde_json がビルドで引く依存
+    'serde_core', 'itoa', 'memchr', 'zmij',
+    // ビルドはされないが、Cargo.lock に名前が出る物。serde と serde_derive は serde_json と serde_core が
+    // 版を揃えるために挙げていて、残りは serde_derive の依存である。derive は使っていない
+    'serde', 'serde_derive', 'proc-macro2', 'quote', 'syn', 'unicode-ident',
+  ]
   /** 依存にも写しにもしない物 (redstone-sim の docs/research/16 §5) */
   const FORBIDDEN = /nucleation|mc-?tick|redsim/i
 

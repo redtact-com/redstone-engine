@@ -12,3 +12,5 @@ path = "src/main.rs"
 
 [dependencies]
 rse-engine = { path = "../rse-engine" }
+# fixture の JSON を読む。serde はこの crate だけで使う (docs/architecture.md §1)
+serde_json = "1"
