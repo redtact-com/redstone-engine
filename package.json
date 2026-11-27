@@ -10,8 +10,11 @@
     "node": ">=22"
   },
   "scripts": {
+    "build:engine": "node packages/engine-js/scripts/build.mjs",
+    "pretest": "npm run build:engine",
     "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json"
+    "typecheck": "tsc -p tsconfig.json",
+    "size": "node packages/engine-js/scripts/size.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.13.2",

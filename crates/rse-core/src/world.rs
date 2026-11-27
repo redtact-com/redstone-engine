@@ -48,6 +48,32 @@ fn cell_index(pos: Pos) -> usize {
 /// 離れた 2 点へ書いて格子が膨らみ、メモリを使い切るのを防ぐ。
 const MAX_GRID_SPAN: i64 = 256;
 
+/// セクションの座標 (x・y・z)。
+type Section3 = (i32, i32, i32);
+
+fn section_of(pos: Pos) -> Section3 {
+    (pos.x >> 4, pos.y >> 4, pos.z >> 4)
+}
+
+/// 範囲 (両端を含む) に、セクションを 1 つ足した箱。
+fn with_section(bounds: Option<(Section3, Section3)>, s: Section3) -> (Section3, Section3) {
+    match bounds {
+        None => (s, s),
+        Some((lo, hi)) => (
+            (lo.0.min(s.0), lo.1.min(s.1), lo.2.min(s.2)),
+            (hi.0.max(s.0), hi.1.max(s.1), hi.2.max(s.2)),
+        ),
+    }
+}
+
+/// 箱の各辺が枠に収まるか。
+fn fits(lo: Section3, hi: Section3) -> bool {
+    let span = |a: i32, b: i32| b as i64 - a as i64 + 1;
+    span(lo.0, hi.0) <= MAX_GRID_SPAN
+        && span(lo.1, hi.1) <= MAX_GRID_SPAN
+        && span(lo.2, hi.2) <= MAX_GRID_SPAN
+}
+
 /// 世界のブロックの格子。
 pub struct World {
     min_y: i32,
@@ -104,33 +130,47 @@ impl World {
         }
     }
 
+    /// 今の格子が覆うセクションの範囲 (両端を含む)。格子がまだ無ければ `None`。
+    fn grid_bounds(&self) -> Option<(Section3, Section3)> {
+        if self.sections.is_empty() {
+            return None;
+        }
+        let o = self.origin;
+        let end = (
+            o.0 + self.size.0 as i32 - 1,
+            o.1 + self.size.1 as i32 - 1,
+            o.2 + self.size.2 as i32 - 1,
+        );
+        Some((o, end))
+    }
+
+    /// 書きたいマスを全部書けるか。高さの内で、空気でないマスのために格子を広げても枠
+    /// (1 辺 256 セクション) に収まるなら真。何も書かず、格子も広げない。
+    ///
+    /// 格子は、今の範囲と書くマスのセクションを合わせた箱へ広がる (`grow_to`)。途中の箱は最後の箱に含まれるので、
+    /// 最後の箱が枠に収まれば、どの順に書いても全部書ける。空気は、何も無い所へ書いても格子を広げないので数えない。
+    /// 読み込みを全部か無しかにする (1 つも書かずに断る) ために、書く前に確かめる。
+    pub fn can_set_all(&self, cells: impl IntoIterator<Item = (Pos, StateId)>) -> bool {
+        let mut bounds = self.grid_bounds();
+        for (pos, state) in cells {
+            if !self.in_bounds(pos) {
+                return false;
+            }
+            if state != StateId::AIR {
+                bounds = Some(with_section(bounds, section_of(pos)));
+            }
+        }
+        bounds.is_none_or(|(lo, hi)| fits(lo, hi))
+    }
+
     /// 格子を、`pos` のセクションを含む広さへ作り直す。枠を超えるなら偽。
     fn grow_to(&mut self, pos: Pos) -> bool {
-        let target = (pos.x >> 4, pos.y >> 4, pos.z >> 4);
-        let (lo, hi) = if self.sections.is_empty() {
-            (target, target)
-        } else {
-            let o = self.origin;
-            let end = (
-                o.0 + self.size.0 as i32 - 1,
-                o.1 + self.size.1 as i32 - 1,
-                o.2 + self.size.2 as i32 - 1,
-            );
-            (
-                (o.0.min(target.0), o.1.min(target.1), o.2.min(target.2)),
-                (
-                    end.0.max(target.0),
-                    end.1.max(target.1),
-                    end.2.max(target.2),
-                ),
-            )
-        };
-        let span = |a: i32, b: i32| b as i64 - a as i64 + 1;
-        let (nx, ny, nz) = (span(lo.0, hi.0), span(lo.1, hi.1), span(lo.2, hi.2));
-        if nx > MAX_GRID_SPAN || ny > MAX_GRID_SPAN || nz > MAX_GRID_SPAN {
+        let (lo, hi) = with_section(self.grid_bounds(), section_of(pos));
+        if !fits(lo, hi) {
             return false;
         }
-        let size = (nx as usize, ny as usize, nz as usize);
+        let span = |a: i32, b: i32| (b as i64 - a as i64 + 1) as usize;
+        let size = (span(lo.0, hi.0), span(lo.1, hi.1), span(lo.2, hi.2));
         let mut next: Vec<Option<Box<Section>>> = Vec::new();
         next.resize_with(size.0 * size.1 * size.2, || None);
         let old = core::mem::take(&mut self.sections);
@@ -285,6 +325,46 @@ mod tests {
         assert_eq!(w.set(Pos::new(16 * 256, 0, 0), stone), None);
         assert_eq!(w.set(Pos::new(16 * 255, 0, 0), stone), Some(StateId::AIR));
         assert_eq!(w.get(Pos::new(0, 0, 0)), stone);
+    }
+
+    // 書けるかの確かめは、実際に書いた結果と同じになる。確かめは何も書かず、格子も広げない。
+    #[test]
+    fn can_set_all_agrees_with_writing() {
+        let stone = block::STONE.default_state();
+        let at = |x: i32, y: i32| (Pos::new(x, y, 0), stone);
+        let far = 16 * 256;
+        type Cells<'a> = &'a [(Pos, StateId)];
+        let cases: [(Cells, Cells, bool); 8] = [
+            // (前に書いた物, 書きたい物, 全部書けるか)
+            (&[], &[at(0, 0), at(far - 16, 0)], true),
+            (&[], &[at(0, 0), at(far, 0)], false),
+            (
+                &[],
+                &[at(0, 0), (Pos::new(far * 4, 0, 0), StateId::AIR)],
+                true,
+            ),
+            (&[], &[at(0, 0), at(0, 320)], false),
+            (&[at(0, 0)], &[at(far - 16, 0)], true),
+            (&[at(0, 0)], &[at(far, 0)], false),
+            (&[at(0, 0)], &[at(-16, 0), at(far - 32, 0)], true),
+            (&[at(0, 0)], &[at(-16, 0), at(far - 16, 0)], false),
+        ];
+        for (i, (before, batch, expect)) in cases.iter().enumerate() {
+            let mut w = world();
+            for (pos, state) in before.iter() {
+                assert!(w.set(*pos, *state).is_some());
+            }
+            let grid = (w.origin, w.size, w.sections.len(), w.pending_changes());
+            assert_eq!(w.can_set_all(batch.iter().copied()), *expect, "case {i}");
+            assert_eq!(
+                (w.origin, w.size, w.sections.len(), w.pending_changes()),
+                grid
+            );
+            let wrote = batch
+                .iter()
+                .all(|(pos, state)| w.set(*pos, *state).is_some());
+            assert_eq!(wrote, *expect, "case {i}");
+        }
     }
 
     #[test]

@@ -35,6 +35,19 @@ pub mod flag {
     pub const ANALOG_OUTPUT: u16 = 1 << 7;
     /// 空気 (V04 §4.6。形状更新の結果が空気なら壊す)。
     pub const AIR: u16 = 1 << 8;
+
+    /// 一覧 (ビットの番号の順)。状態表の JSON の書き出し (rse-cli) が名前を引く。
+    pub const ALL: [(u16, &str); 9] = [
+        (CONDUCTOR, "CONDUCTOR"),
+        (SIGNAL_SOURCE, "SIGNAL_SOURCE"),
+        (FULL_COLLISION, "FULL_COLLISION"),
+        (HAS_BE, "HAS_BE"),
+        (UNBREAKABLE, "UNBREAKABLE"),
+        (REPLACEABLE, "REPLACEABLE"),
+        (SOLID, "SOLID"),
+        (ANALOG_OUTPUT, "ANALOG_OUTPUT"),
+        (AIR, "AIR"),
+    ];
 }
 
 /// 面の支えの種類 (V05 §4.7.4。SupportType)。
@@ -665,6 +678,17 @@ mod tests {
         assert_eq!(wire.behavior(), Behavior::Wire);
         assert_eq!(lamp.behavior(), Behavior::Lamp);
         assert_eq!(stone.behavior(), Behavior::Inert);
+    }
+
+    // 一覧は 1 ビットずつで、番号の順に隙間なく並ぶ。表のどの状態の性質も、一覧のビットだけでできている。
+    #[test]
+    fn flag_list_covers_every_bit() {
+        let bits: Vec<u16> = flag::ALL.iter().map(|(b, _)| *b).collect();
+        assert_eq!(bits, (0..9).map(|n| 1u16 << n).collect::<Vec<_>>());
+        let known = bits.iter().fold(0, |acc, b| acc | b);
+        for s in 0..STATE_COUNT as u16 {
+            assert_eq!(StateId(s).flags() & !known, 0);
+        }
     }
 
     // 面の支え (V05 §4.7.5 の「縦切りの 5 種の値」)。
