@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { createServer, connect } from 'node:net'
-import { BLOCKED } from './no-network.setup'
+import { createServer, connect, type LookupFunction } from 'node:net'
+import { get as httpGet } from 'node:http'
+import { get as httpsGet } from 'node:https'
+import { BLOCKED, connectHost } from './no-network.setup'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -456,6 +458,48 @@ describe('テストはネットワークに出ない (vitest の setupFiles)', (
       s.on('error', done)
     })
     expect(err.message).toContain(BLOCKED)
+  })
+
+  it('http.get・https.get で外の名前へ出ようとしたら断る (Agent が path: null を付けて net へ渡す形)', async () => {
+    // 見張りが崩れても手元で閉じるよう、名前の解決 (lookup) は 127.0.0.1 の台へ向ける。断れば台には何も届かない
+    let reached = 0
+    const server = createServer(sock => { reached++; sock.destroy() })
+    await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
+    const { port } = server.address() as { port: number }
+    const toLocal = ((_host: string, opts: { all?: boolean }, cb: (...a: unknown[]) => void) =>
+      (opts.all ? cb(null, [{ address: '127.0.0.1', family: 4 }]) : cb(null, '127.0.0.1', 4))) as unknown as LookupFunction
+    const errorOf = (get: typeof httpGet) => new Promise<Error>(done => {
+      const req = get({ host: 'example.invalid', port, path: '/x', lookup: toLocal, agent: undefined }, res => res.resume())
+      req.on('error', done)
+    })
+    try {
+      expect((await errorOf(httpGet)).message).toContain(BLOCKED)
+      expect((await errorOf(httpsGet as unknown as typeof httpGet)).message).toContain(BLOCKED)
+      expect(reached).toBe(0)
+    } finally {
+      await new Promise(done => server.close(done))
+    }
+  })
+
+  it('pipe の見分けは net と同じ (path が空でない文字列の時だけ。null と空文字は pipe でない)', () => {
+    expect(connectHost([{ host: 'example.invalid', port: 80, path: null }])).toBe('example.invalid')
+    expect(connectHost([{ host: 'example.invalid', port: 80, path: '' }])).toBe('example.invalid')
+    expect(connectHost([{ path: '/tmp/x.sock' }])).toBeNull()
+    expect(connectHost([[{ host: 'a.invalid', port: 1 }, () => {}]])).toBe('a.invalid')
+    expect(connectHost(['/tmp/x.sock'])).toBeNull()
+    expect(connectHost(['80', 'b.invalid'])).toBe('b.invalid')
+    expect(connectHost([80])).toBe('localhost')
+    expect(connectHost([''])).toBe('localhost')
+  })
+
+  it('ネットワークに出ない URL (data:・blob:) の fetch は断らない', async () => {
+    expect(await (await fetch('data:text/plain,ok')).text()).toBe('ok')
+    const url = URL.createObjectURL(new Blob(['blob-ok']))
+    try {
+      expect(await (await fetch(url)).text()).toBe('blob-ok')
+    } finally {
+      URL.revokeObjectURL(url)
+    }
   })
 
   it('127.0.0.1 には出られる (engine-js の試験の台)', async () => {
