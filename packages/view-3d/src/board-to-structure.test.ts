@@ -95,6 +95,22 @@ describe('文字列の正規化 (normalizeState)', () => {
     for (const s of [LEVER_OFF, WIRE(15), LAMP(true), 'stone']) expect(normalizeState(s)).toBe(s)
   })
 
+  it('conformance の fixture に出る文字列 (実機の blockstate の書き方) は、どれもそのまま', () => {
+    // fixture の文字列は StateTable.name と同じ書き方 (プロパティは名前順で全部)。並べ替えで崩さないことを、手で書いた例でなく実機の記録で見る
+    const dir = new URL('../../../conformance/fixtures/', import.meta.url)
+    const names = new Set<string>()
+    for (const f of readdirSync(dir).filter(f => f.endsWith('.json'))) {
+      const fx = JSON.parse(readFileSync(new URL(f, dir), 'utf-8')) as {
+        blocks: { block: string }[]; expect: { changes: { block: string }[] }[]
+      }
+      for (const b of fx.blocks) names.add(b.block)
+      for (const e of fx.expect) for (const c of e.changes) names.add(c.block)
+    }
+    const withProps = [...names].filter(n => n.includes('['))
+    expect(withProps.length).toBeGreaterThan(5)
+    for (const n of names) expect(normalizeState(n), n).toBe(n === 'air' ? null : n)
+  })
+
   it('並べ替えは鍵で比べる (鍵が別の鍵の頭になる時も、`=` と数字の大小で崩れない)', () => {
     expect(normalizeState('x[powered=true,power=1]')).toBe('x[power=1,powered=true]')
     expect(normalizeState('x[a1=p,a=q]')).toBe('x[a=q,a1=p]')
