@@ -9,5 +9,5 @@
     "jsx": "react-jsx",
     "types": ["node"]
   },
-  "include": ["tools/**/*.ts", "packages/*/src/**/*.ts", "packages/*/src/**/*.tsx", "packages/*/test/**/*.ts", "vitest.config.ts"]
+  "include": ["tools/**/*.ts", "packages/*/src/**/*.ts", "packages/*/src/**/*.tsx", "packages/*/test/**/*.ts", "packages/*/test/**/*.tsx", "vitest.config.ts"]
 }

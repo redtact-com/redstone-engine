@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
+import { createServer, connect } from 'node:net'
+import { BLOCKED } from './no-network.setup'
 import { readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -109,7 +111,7 @@ describe('著作権まわりの衛生 (docs/ip-policy.md)', () => {
   })
 
   it('テクスチャ・モデル・リソースパック・ゲームのデータの抜き書きを追跡していない (docs/ip-policy.md §2)', () => {
-    const hits = assetHits(tracked())
+    const hits = [...assetHits(tracked()), ...submoduleHits(readText('.gitmodules') ?? '', gitlinks())]
     expect(hits, `アセットは同梱しない。実行時に取得先から取る (docs/ip-policy.md §2)\n${hits.join('\n')}`).toEqual([])
   })
 
@@ -128,6 +130,15 @@ describe('著作権まわりの衛生 (docs/ip-policy.md)', () => {
       'x/textures/entity/chest/normal.png',
       'x/models/block/lever.json',
       'x/blockstates/lever.json',
+      // zip にしたパック
+      'apps/web/public/packs/mk2.zip',
+      'vendor/textures.mcpack',
+      // PrismarineJS/minecraft-assets (と minecraft-data) の置き方
+      'vendor/minecraft-assets/data/1.21.4/blocks/stone.png',
+      'data/1.21.4/items/lever.png',
+      'data/pc/1.21.4/blocks.json',
+      'x/texture_content.json',
+      'x/blocks_textures.json',
     ]) {
       expect(assetHits([path]).length, path).toBeGreaterThan(0)
     }
@@ -138,7 +149,29 @@ describe('著作権まわりの衛生 (docs/ip-policy.md)', () => {
       'packages/view-3d/src/renderer/mcAssets.ts',
       'packages/view-3d/src/renderer/assetSources.ts',
       'docs/assets.md',
+      'conformance/fixtures/lever-wire-lamp.json',
+      'packages/engine-js/test/fixture.ts',
     ])).toEqual([])
+  })
+
+  it('submodule の見張りは、取得先のリポとパックを submodule にした物を拾う', () => {
+    const gitmodules = [
+      '[submodule "vendor/mcmeta"]',
+      '\tpath = vendor/mcmeta',
+      '\turl = https://github.com/misode/mcmeta.git',
+      '[submodule "assets"]',
+      '\tpath = vendor/x',
+      '\turl = https://github.com/PrismarineJS/minecraft-assets',
+      '[submodule "tools"]',
+      '\tpath = tools/other',
+      '\turl = https://github.com/example/linter.git',
+    ].join('\n')
+    // mcmeta は path と url の両方、minecraft-assets は url で拾う。ほかのリポは拾わない
+    expect(submoduleHits(gitmodules, [])).toHaveLength(3)
+    expect(submoduleHits(gitmodules, []).some(h => h.includes('linter'))).toBe(false)
+    // .gitmodules に書かずに追跡した submodule (gitlink) の名前も見る
+    expect(submoduleHits('', ['public/resourcepack', 'vendor/minecraft-data', 'tools/other'])).toHaveLength(2)
+    expect(submoduleHits('', [])).toEqual([])
   })
 })
 
@@ -155,7 +188,29 @@ const ASSET_PLACES: { name: string; re: RegExp }[] = [
   { name: 'blockstates と models の束 (PrismarineJS)', re: /(^|\/)blocks_(states|models)\.json$/ },
   { name: 'blockstates・models・textures の置き場', re: /(^|\/)(blockstates|models\/(block|item)|textures\/(block|item|entity))\// },
   { name: 'variant の表 (ゲームのデータの抜き書き)', re: /(^|\/)blockstate-variants[^/]*$/ },
+  { name: 'zip にしたパック', re: /\.(zip|mcpack|mcaddon)$/i },
+  // PrismarineJS/minecraft-assets と minecraft-data は data/<版>/ (data/pc/<版>/) の下にブロックと品物の絵や表を置く
+  { name: 'PrismarineJS の置き方 (data/<版>/)', re: /(^|\/)data\/(pc\/|bedrock\/)?\d+\.\d+(\.\d+)?[^/]*\// },
+  { name: 'PrismarineJS の表 (texture_content.json ほか)', re: /(^|\/)(texture_content|blocks_textures|items_textures)\.json$/ },
 ]
+
+/** submodule にしてはいけない物 (取得先のリポ・パック) */
+const SUBMODULE_BAD = /mcmeta|minecraft-assets|minecraft-data|resource-?packs?|deepslate|assets\/minecraft/i
+
+/** 追跡している submodule (gitlink。mode 160000) の道筋 */
+function gitlinks(): string[] {
+  return execFileSync('git', ['ls-files', '-s'], { cwd: repoRoot, encoding: 'utf-8' })
+    .split('\n').filter(l => l.startsWith('160000 ')).map(l => l.split('\t')[1])
+}
+
+/** .gitmodules の path と url、gitlink の道筋のうち、取得先のリポとパックに見える物 */
+function submoduleHits(gitmodules: string, links: string[]): string[] {
+  const lines = gitmodules.split('\n').map(l => l.trim()).filter(l => /^(path|url)\s*=/.test(l))
+  return [
+    ...lines.filter(l => SUBMODULE_BAD.test(l)).map(l => `.gitmodules: ${l} [submodule]`),
+    ...links.filter(l => SUBMODULE_BAD.test(l)).map(l => `${l} [submodule (gitlink)]`),
+  ]
+}
 
 function assetHits(paths: string[]): string[] {
   return paths.flatMap(f => ASSET_PLACES.filter(p => p.re.test(f)).map(p => `${f} [${p.name}]`))
@@ -385,5 +440,39 @@ describe('Rust の依存の見張り (19 §9.3)', () => {
       }
     }
     expect(hits, `データの持ち込みは決めたフォルダだけ\n${hits.join('\n')}`).toEqual([])
+  })
+})
+
+/** テストからネットワークに出ない見張り (tools/no-network.setup.ts。#11) */
+describe('テストはネットワークに出ない (vitest の setupFiles)', () => {
+  it('fetch で手元の外へ出ようとしたら断る', async () => {
+    await expect(fetch('https://raw.githubusercontent.com/misode/mcmeta/x.png')).rejects.toThrow(BLOCKED)
+    await expect(fetch(new URL('https://cdn.jsdelivr.net/gh/x@y/z.json'))).rejects.toThrow(BLOCKED)
+  })
+
+  it('net の接続で手元の外へ出ようとしたら断る (http・undici の下の口)', async () => {
+    const err = await new Promise<Error>(done => {
+      const s = connect({ host: 'example.invalid', port: 443 })
+      s.on('error', done)
+    })
+    expect(err.message).toContain(BLOCKED)
+  })
+
+  it('127.0.0.1 には出られる (engine-js の試験の台)', async () => {
+    const server = createServer(sock => sock.end('ok'))
+    await new Promise<void>(done => server.listen(0, '127.0.0.1', done))
+    const { port } = server.address() as { port: number }
+    try {
+      const text = await new Promise<string>((done, fail) => {
+        const s = connect({ host: '127.0.0.1', port })
+        let got = ''
+        s.on('data', d => { got += d })
+        s.on('end', () => done(got))
+        s.on('error', fail)
+      })
+      expect(text).toBe('ok')
+    } finally {
+      await new Promise(done => server.close(done))
+    }
   })
 })
