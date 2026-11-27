@@ -8,6 +8,12 @@
 //!
 //! 実験の評価器 (V06 §4.13) と Orientation は持たない。既定の世界では使わない (V06 §4.17)。
 //! アイテムのドロップも持たない。
+//!
+//! UNVERIFIED: ダストが自分で配る NC の送り元のブロック。V06 が「送り主はダスト」と書いているのは、
+//! 評価器の 7 起点 (§4.12 の手順 5) と右クリックの書き込み (§4.16 の手順 5) だけである。
+//! 設置の上下と角の確認 (§4.14)・除去の 6 起点 (§4.15)・右クリックの導体の先 (§4.16 の手順 6) は、
+//! 「素子が自分で配る NC の送り元は配った本人」(V11 §3.1 の要点 1) に合わせてダストにした。
+//! 今の 5 種の受け手は送り元を読まないので、結果には効かない。
 
 use crate::RedstoneRules;
 use rse_core::state::block;
@@ -507,8 +513,7 @@ pub fn use_block<R: RedstoneRules>(lv: &mut Level<R>, pos: Pos, state: StateId) 
     for (i, dir) in Dir::HORIZONTAL.into_iter().enumerate() {
         let near = pos.offset(dir);
         if held.0[i].is_connected() != next.0[i].is_connected() && lv.is_conductor(near) {
-            // UNVERIFIED: この NC の送り元のブロックは V06 §4.16 の手順 6 に書いていない。
-            // 「素子が自分で配る NC の送り元は配った本人」(V11 §3.1 の要点 1) に合わせて、ダストにした。
+            // 送り元は冒頭の UNVERIFIED のとおり。
             lv.update_neighbors_at_except(near, block::REDSTONE_WIRE, dir.opposite(), None);
         }
     }
