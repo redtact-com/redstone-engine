@@ -248,8 +248,9 @@ impl Fixture {
                 ));
             }
             // 領域の外のブロックは置くだけで、比べない。
+            let shown = state.to_string();
             if let Some(cell) = board.get_mut(&key(*pos)) {
-                *cell = state.to_string();
+                *cell = shown;
             }
         }
 
