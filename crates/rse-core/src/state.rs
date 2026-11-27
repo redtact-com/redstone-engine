@@ -8,10 +8,12 @@
 //!   プロパティの書き換えは桁の差し替えで済む。
 //! - 性質は状態ごとの密な表で引く。ビットは別々に持ち、1 つに畳まない (19 §3.1)。
 //!
-//! 表の中身は [`crate::table`] にある。面の支えと押し反応の列は、使う素子が入る PR で足す。
+//! 表の中身は [`crate::table`] にある。面の支えの列は [`support`] のビットで持つ (V05 §4.7.5)。
+//! 押し反応の列は、使う素子 (ピストン) が入る PR で足す (値は V05 §4.6.3 にある)。
 
 use crate::table::BLOCKS;
 use core::fmt;
+use rse_java::Dir;
 
 /// 性質のビット (状態ごと)。
 pub mod flag {
@@ -33,6 +35,39 @@ pub mod flag {
     pub const ANALOG_OUTPUT: u16 = 1 << 7;
     /// 空気 (V04 §4.6。形状更新の結果が空気なら壊す)。
     pub const AIR: u16 = 1 << 8;
+}
+
+/// 面の支えの種類 (V05 §4.7.4。SupportType)。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum SupportType {
+    /// 面がすべて覆われる。ダストの足元・レバーの取り付け面が求める。
+    Full = 0,
+    /// 面の中央 2×2 ピクセルが覆われる。
+    Center = 1,
+    /// 面の外周 2 ピクセル幅が覆われる。
+    Rigid = 2,
+}
+
+/// 面の支えのビット (状態ごと。V05 §4.7.5)。
+///
+/// 値は 1 状態につき 6 方向 × 3 種 = 18 個で、位置にも周りのブロックにも依らない。
+/// ビットの番号は「種類 × 6 + 方向の宣言順の番号」。
+/// 位置で変わる支え (開いたシュルカーボックス) は、その素子が入る時に関数を通す。
+pub mod support {
+    use super::SupportType;
+    use rse_java::Dir;
+
+    /// どの面も支えない (支えの形が空。当たり判定の無いブロック)。
+    pub const NONE: u32 = 0;
+    /// 6 面 × 3 種とも支える (支えの形が立方体)。
+    pub const ALL: u32 = (1 << 18) - 1;
+
+    /// 1 つの面・1 つの種類のビット。
+    #[inline]
+    pub const fn bit(dir: Dir, kind: SupportType) -> u32 {
+        1 << (kind as u32 * 6 + dir.index() as u32)
+    }
 }
 
 /// 振る舞いの種類。素子の関数は、これを match して振り分ける (19 §2.4・docs/architecture.md §3)。
@@ -136,6 +171,8 @@ pub struct BlockDef {
     pub behavior: Behavior,
     /// 性質のビット。今の 5 種は状態によらない。状態で割れるブロックは、生成器が状態ごとの表を作る。
     pub flags: u16,
+    /// 面の支えのビット ([`support`])。今の 5 種は状態によらない (V05 §4.7.5 の表)。
+    pub support: u32,
 }
 
 /// ブロックの数。
@@ -188,6 +225,17 @@ static STATE_FLAGS: [u16; STATE_COUNT] = {
     let mut s = 0;
     while s < STATE_COUNT {
         out[s] = BLOCKS[STATE_BLOCK[s] as usize].flags;
+        s += 1;
+    }
+    out
+};
+
+/// 状態 → 面の支えのビット。
+static STATE_SUPPORT: [u32; STATE_COUNT] = {
+    let mut out = [0u32; STATE_COUNT];
+    let mut s = 0;
+    while s < STATE_COUNT {
+        out[s] = BLOCKS[STATE_BLOCK[s] as usize].support;
         s += 1;
     }
     out
@@ -299,6 +347,13 @@ impl StateId {
     #[inline]
     pub fn is_conductor(self) -> bool {
         self.has(flag::CONDUCTOR)
+    }
+
+    /// 面が支えになるか (V05 §4.7.5。BlockStateBase.isFaceSturdy)。
+    /// `dir` は、この状態のブロックから見た面の方向 (上面なら上)。
+    #[inline]
+    pub fn is_face_sturdy(self, dir: Dir, kind: SupportType) -> bool {
+        STATE_SUPPORT[self.0 as usize] & support::bit(dir, kind) != 0
     }
 
     #[inline]
@@ -610,6 +665,30 @@ mod tests {
         assert_eq!(wire.behavior(), Behavior::Wire);
         assert_eq!(lamp.behavior(), Behavior::Lamp);
         assert_eq!(stone.behavior(), Behavior::Inert);
+    }
+
+    // 面の支え (V05 §4.7.5 の「縦切りの 5 種の値」)。
+    // 石とランプは 6 面 × 3 種とも真。空気・レバー (24 状態)・ダスト (1296 状態) は 18 個とも偽。
+    #[test]
+    fn face_support_of_five_blocks() {
+        for s in 0..STATE_COUNT as u16 {
+            let state = StateId(s);
+            let expect = matches!(state.block(), block::STONE | block::REDSTONE_LAMP);
+            for dir in Dir::ALL {
+                for kind in [SupportType::Full, SupportType::Center, SupportType::Rigid] {
+                    assert_eq!(state.is_face_sturdy(dir, kind), expect, "{state} {dir:?}");
+                }
+            }
+        }
+        // ビットは 18 個で、重ならない。
+        let mut seen = 0u32;
+        for dir in Dir::ALL {
+            for kind in [SupportType::Full, SupportType::Center, SupportType::Rigid] {
+                assert_eq!(seen & support::bit(dir, kind), 0);
+                seen |= support::bit(dir, kind);
+            }
+        }
+        assert_eq!(seen, support::ALL);
     }
 
     #[test]
