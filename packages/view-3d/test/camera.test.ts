@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { fitDistance, maxZoomOut, VIEWER_FOV_DEG, VIEWER_FAR } from '../src/camera'
+import { cameraFor, initialCamera } from '../src/renderer/useCamera'
 
 /**
  * カメラの寄りが回路の大きさに追従するか (redstone-sim#238)。
@@ -71,5 +72,17 @@ describe('maxZoomOut — 引ける上限 (redstone-sim#238)', () => {
     const size: [number, number, number] = [256, 256, 256]
     const radius = Math.hypot(...size) / 2
     expect(maxZoomOut(size) + radius).toBeLessThan(VIEWER_FAR)
+  })
+})
+
+describe('3D と真上の 2D のカメラ (useCamera。#11)', () => {
+  it('最初のカメラは移す元と同じ (3D は 45/45、2D は真上。寄りはどちらも 20)', () => {
+    expect(initialCamera(false)).toEqual({ rotX: 45, rotY: 45, distance: 20, panX: 0, panZ: 0 })
+    expect(initialCamera(true)).toEqual({ rotX: 90, rotY: 0, distance: 20, panX: 0, panZ: 0 })
+  })
+
+  it('切り替えでは向きとパンを置き直し、寄りは引き継ぐ', () => {
+    expect(cameraFor(true, 33)).toEqual({ rotX: 90, rotY: 0, distance: 33, panX: 0, panZ: 0 })
+    expect(cameraFor(false, 12)).toEqual({ rotX: 45, rotY: 45, distance: 12, panX: 0, panZ: 0 })
   })
 })

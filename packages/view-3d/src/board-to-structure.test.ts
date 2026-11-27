@@ -8,7 +8,7 @@ import {
   BoardModel, BoardView, CHUNK_SIZE, MAX_CHUNK_LIST, cellKey, normalizeState, resourceNameOf,
   type Redraw, type RedrawTarget, type ViewHooks,
 } from './board-to-structure'
-import { releaseIfDetached } from './IsometricView'
+import { releaseWhenDetached, type WatchDom } from './IsometricView'
 import { defaultPropsOf } from './renderer/buildResources'
 import type { Board, BoardBounds, CellChange } from './types'
 
@@ -291,6 +291,9 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
     ]
     // 初めの盤面には pool の一部だけを置く (新しい名前の道を通すため)
     const firstPool = pool.slice(0, 4)
+    // 途中で pool に足す名前と、範囲が変わる歩で 1 つずつ置く名前 (範囲が変わる道でも新しい名前を通す)
+    const later = new Map<number, string>([[50, 'observer[facing=north,powered=false]'], [100, 'target[power=0]']])
+    const forResize = ['note_block[instrument=harp,note=0,powered=false]', 'piston[extended=false,facing=up]', 'slime_block', 'hopper[enabled=true,facing=down]', 'dropper[facing=up,triggered=false]', 'composter[level=0]', 'lodestone', 'soul_sand']
     const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)]
     const int = (lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1))
 
@@ -311,9 +314,11 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
     const m = new BoardModel(boardOf(b, truth))
     const seen = new Set(m.names)
     expect([...seen].sort()).toEqual(['glass', 'lever', 'stone'])
-    const kinds = { chunks: 0, full: 0, none: 0, resized: 0, named: 0, resizedNamed: 0 }
+    const kinds = { chunks: 0, full: 0, none: 0, resized: 0, named: 0, resizedNamed: 0, lateNamed: 0 }
 
     for (let step = 0; step < 160; step++) {
+      const added = later.get(step)
+      if (added !== undefined) pool.push(added)
       const before = chunkSignatures(m.structure)
       const prev = normalizedOf(truth)
       const r = rnd()
@@ -356,6 +361,8 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
         }
         const n = int(1, 3)
         for (let i = 0; i < n; i++) truth.set(cellKey(int(b.x[0], b.x[1]), int(b.y[0], b.y[1]), int(b.z[0], b.z[1])), pick(pool))
+        const fresh = forResize.shift()
+        if (fresh !== undefined) truth.set(cellKey(int(b.x[0], b.x[1]), int(b.y[0], b.y[1]), int(b.z[0], b.z[1])), fresh)
         u = m.setBoard(boardOf(b, truth))
         expect(u.redraw, `step ${step}`).toEqual({ kind: 'full', resized: true })
         kinds.resized++
@@ -370,7 +377,11 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
       fresh.forEach(n => seen.add(n))
       expect(u.changed, `step ${step} changed`).toBe(changed)
       expect([...u.newNames].sort(), `step ${step} newNames`).toEqual(fresh)
-      if (fresh.length > 0) kinds.named++
+      if (fresh.length > 0) {
+        kinds.named++
+        // 途中で足した名前が、範囲の変わらない道 (applyChanges・setBoard) で初めて出た
+        if (step >= 50 && !(u.redraw.kind === 'full' && u.redraw.resized)) kinds.lateNamed++
+      }
 
       if (u.redraw.kind !== 'full' || !u.redraw.resized) {
         expectChunksCover(before, chunkSignatures(m.structure), u.redraw, `step ${step}`)
@@ -386,8 +397,11 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
     expect(kinds.chunks).toBeGreaterThan(30)
     expect(kinds.full - kinds.resized).toBeGreaterThan(3)
     expect(kinds.resized).toBeGreaterThan(3)
-    expect(kinds.named).toBeGreaterThan(0)
-    expect([...seen].sort()).toEqual(['glass', 'iron_bars', 'lever', 'purple_shulker_box', 'redstone_lamp', 'redstone_torch', 'redstone_wire', 'stone'])
+    expect(kinds.lateNamed).toBeGreaterThan(0)                     // 範囲が変わらない道でも、途中で名前が出た
+    expect(kinds.resizedNamed).toBeGreaterThan(0)                  // 範囲が変わる道でも
+    for (const n of ['iron_bars', 'purple_shulker_box', 'redstone_lamp', 'redstone_torch', 'redstone_wire', 'observer', 'target']) {
+      expect(seen.has(n), n).toBe(true)
+    }
   })
 
   it('範囲を広げると同時に新しい名前を置くと、newNames と changed を返し、そのマスを描く', () => {
@@ -636,6 +650,39 @@ describe('盤面の変化を絵へ当てる配線 (BoardView。IsometricView が
     expect(log.at(-1)).toBe('names glass,lever,redstone_lamp,stone')
   })
 
+  it('preload に入っている名前が盤面に初めて出た時は、資源を作り直さず、チャンクだけ作り直す (絵は外さない)', () => {
+    // アプリが状態表の名前を preloadNames に渡す使い方では、これが普通の道になる
+    const { log, hooks } = recorder()
+    const view = new BoardView<FakeRenderer>(boardOf(b, initial), ['stone', 'lever', 'minecraft:redstone_lamp[lit=false]'], hooks)
+    expect(view.resourceNames).toEqual(['lever', 'redstone_lamp', 'stone'])
+    const r = view.attach(structure => new FakeRenderer(structure))
+    expect(view.model.names.has('redstone_lamp')).toBe(false)   // 盤面にはまだ無い
+
+    expect(view.applyChanges([{ x: 3, y: 0, z: 3, state: LAMP(true) }])).toEqual({ step: 'chunks', result: { changed: 1, outside: 0 } })
+    expect(view.model.names.has('redstone_lamp')).toBe(true)    // 盤面に初めて出た (BoardModel は新しい名前として返した)
+    expect(view.renderer).toBe(r)
+    expect(r.calls).toEqual(['chunks 0,0,0'])
+    expect(log).toEqual(['draw'])                               // 資源の作り直しは頼まない
+    expect(view.resourceNames).toEqual(['lever', 'redstone_lamp', 'stone'])
+    // setBoard の道も同じ
+    expect(view.setBoard(boardOf(b, { ...initial, '40,2,40': LAMP(false) })).step).toBe('chunks')
+    expect(log).toEqual(['draw', 'draw'])
+  })
+
+  it('絵が無い間 (最初の読み込み中・資源の作り直し中) に新しい名前が続けて出ても、そのたびに作り直しを頼み、資源に入る', () => {
+    const { log, hooks } = recorder()
+    const view = new BoardView<FakeRenderer>(boardOf(b, initial), [], hooks)
+    expect(view.applyChanges([{ x: 3, y: 0, z: 3, state: LAMP(true) }]).step).toBe('names')
+    expect(view.applyChanges([{ x: 4, y: 0, z: 3, state: 'glass' }]).step).toBe('names')   // 作り直しの間にもう 1 つ
+    expect(view.applyChanges([{ x: 5, y: 0, z: 3, state: LAMP(false) }]).step).toBe('loading')
+    expect(log).toEqual(['names lever,redstone_lamp,stone', 'names glass,lever,redstone_lamp,stone'])
+    expect(view.resourceNames).toEqual(['glass', 'lever', 'redstone_lamp', 'stone'])
+    // IsometricView は最後に頼まれた名前で資源を作り、その時の構造で attach する
+    const r = view.attach(structure => new FakeRenderer(structure))
+    expect(r.structure.getBlock([4, 0, 3])?.state.toString()).toBe('minecraft:glass')
+    expect(r.structure.getBlock([5, 0, 3])?.state.toString()).toBe(`minecraft:${LAMP(false)}`)
+  })
+
   it('detach は、渡した絵が今の絵の時だけ外す (古い初期化の片付けが、新しい絵を外さない)', () => {
     const view = new BoardView<FakeRenderer>(boardOf(b, initial), [], recorder().hooks)
     const old = view.attach(structure => new FakeRenderer(structure))
@@ -652,7 +699,7 @@ describe('盤面の変化を絵へ当てる配線 (BoardView。IsometricView が
   })
 })
 
-describe('WebGL の文脈を手放す (IsometricView の releaseIfDetached)', () => {
+describe('WebGL の文脈を手放す (IsometricView の releaseWhenDetached)', () => {
   function fakeCanvas(isConnected: boolean, hasGl = true) {
     let lost = 0
     const ext = { loseContext: () => { lost++ } }
@@ -664,37 +711,64 @@ describe('WebGL の文脈を手放す (IsometricView の releaseIfDetached)', ()
     return { canvas, lost: () => lost }
   }
 
-  it('canvas が DOM に残っている間 (Activity の hidden・StrictMode の付け直し) は手放さない', () => {
-    const c = fakeCanvas(true)
-    expect(releaseIfDetached(c.canvas)).toBe(false)
-    expect(c.lost()).toBe(0)
-  })
+  /** DOM の変化の見張りの代役。`fire` で変化を知らせる。付いているかを `watching` で見る */
+  function fakeWatch() {
+    let listener: (() => void) | null = null
+    const watch: WatchDom = onChange => {
+      listener = onChange
+      return () => { listener = null }
+    }
+    return { watch, fire: () => listener?.(), watching: () => listener !== null }
+  }
 
-  it('DOM から外れていたら手放す。WebGL が無ければ何もしない', () => {
+  it('もう DOM から外れていたら、すぐ手放す (見張らない)。WebGL が無ければ何もしない', () => {
     const c = fakeCanvas(false)
-    expect(releaseIfDetached(c.canvas)).toBe(true)
+    const w = fakeWatch()
+    releaseWhenDetached(c.canvas, w.watch)
     expect(c.lost()).toBe(1)
-    expect(releaseIfDetached(fakeCanvas(false, false).canvas)).toBe(true)
-  })
-})
-
-describe('既定のプロパティ (buildResources の defaultPropsOf。redstone-sim#343)', () => {
-  // 盤面の文字列がプロパティを省いていても、variant の値から補って描く (補わないと何も描かれず消える)
-  it('既定プロパティは variant の値から作る (原木は縦置き・雪は無し)', () => {
-    expect(defaultPropsOf({ variants: { 'axis=x': {}, 'axis=y': {}, 'axis=z': {} } }))
-      .toEqual({ axis: 'y' })
-    expect(defaultPropsOf({ variants: { 'snowy=false': {}, 'snowy=true': {} } }))
-      .toEqual({ snowy: 'false' })
-    expect(defaultPropsOf({ variants: { 'facing=east': {}, 'facing=north': {}, 'facing=south': {} } }))
-      .toEqual({ facing: 'north' })
+    expect(w.watching()).toBe(false)
+    expect(() => releaseWhenDetached(fakeCanvas(false, false).canvas, w.watch)).not.toThrow()
   })
 
-  it('好ましい値が無ければ最初の値を使う', () => {
-    expect(defaultPropsOf({ variants: { 'level=1': {}, 'level=2': {} } })).toEqual({ level: '1' })
+  it('Activity で隠した (DOM に残る) 間は手放さず、隠したまま外されたら手放す', () => {
+    const c = fakeCanvas(true)
+    const w = fakeWatch()
+    releaseWhenDetached(c.canvas, w.watch)
+    expect(c.lost()).toBe(0)
+    expect(w.watching()).toBe(true)
+    w.fire()                         // ほかの所が変わっただけ
+    expect(c.lost()).toBe(0)
+    c.canvas.isConnected = false     // 隠したまま外された
+    w.fire()
+    expect(c.lost()).toBe(1)
+    expect(w.watching()).toBe(false)
+    w.fire()
+    expect(c.lost()).toBe(1)
   })
 
-  it('プロパティ不問の variant があれば補わない', () => {
-    expect(defaultPropsOf({ variants: { '': {} } })).toEqual({})
+  it('外れる前に戻した (effect がやり直した) ら、見張りを止め、後で外れても手放さない (次の片付けが見る)', () => {
+    const c = fakeCanvas(true)
+    const w = fakeWatch()
+    const stop = releaseWhenDetached(c.canvas, w.watch)
+    stop()
+    expect(w.watching()).toBe(false)
+    c.canvas.isConnected = false
+    w.fire()
+    expect(c.lost()).toBe(0)
+    expect(() => stop()).not.toThrow()
+  })
+
+  it('見張りを付ける間に外れても取りこぼさない (見張りの口が呼び返しをすぐ呼ぶ時も)', () => {
+    const c = fakeCanvas(true)
+    let stopped = 0
+    const eager: WatchDom = onChange => {
+      c.canvas.isConnected = false
+      onChange()
+      return () => { stopped++ }
+    }
+    releaseWhenDetached(c.canvas, eager)
+    expect(c.lost()).toBe(1)
+    expect(stopped).toBe(1)
   })
 })
 
@@ -796,8 +870,13 @@ function exportedNamesOf(text: string): { names: string[]; star: number } {
     if (ts.isExportDeclaration(st)) {
       if (!st.exportClause || ts.isNamespaceExport(st.exportClause)) star++
       else for (const e of st.exportClause.elements) names.push(e.name.text)
+    } else if (ts.isExportAssignment(st)) {
+      names.push(st.isExportEquals ? 'export=' : 'default')        // export default <式> と export = <式>
     } else if (ts.canHaveModifiers(st) && ts.getModifiers(st)?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
-      names.push((st as ts.DeclarationStatement).name?.getText(sf) ?? '<名前なし>')
+      const isDefault = ts.getModifiers(st)?.some(m => m.kind === ts.SyntaxKind.DefaultKeyword)
+      if (isDefault) names.push('default')
+      else if (ts.isVariableStatement(st)) for (const d of st.declarationList.declarations) names.push(d.name.getText(sf))
+      else names.push((st as ts.DeclarationStatement).name?.getText(sf) ?? '<名前なし>')
     }
   }
   return { names: names.sort(), star }
@@ -824,7 +903,8 @@ function deepslateLeaksOf(program: ts.Program, file: string): string[] {
   const inside = (s: ts.Symbol | undefined, re: RegExp) => !!s?.declarations?.some(d => re.test(d.getSourceFile().fileName))
   const DEEPSLATE = /[\\/]node_modules[\\/]deepslate[\\/]/
   const leaks = new Set<string>()
-  const seen = new Set<ts.Type>()
+  // 書き出す物ごとに作り直す (前の物で見た型を飛ばして、後の物の漏れを見落とさない)
+  let seen = new Set<ts.Type>()
   const walk = (t: ts.Type, path: string): void => {
     if (seen.has(t)) return
     seen.add(t)
@@ -838,13 +918,24 @@ function deepslateLeaksOf(program: ts.Program, file: string): string[] {
       for (const a of checker.getTypeArguments(t as ts.TypeReference)) walk(a, `${path}<>`)
     }
     if (t.isUnionOrIntersection()) for (const u of t.types) walk(u, path)
+    if (t.flags & ts.TypeFlags.TypeParameter) {
+      // 型の引数は制約だけを見る (制約の中身は制約の型をたどる時に見る)
+      const c = checker.getBaseConstraintOfType(t)
+      if (c && c !== t) walk(c, `${path} extends`)
+      return
+    }
     const decls = sym?.declarations ?? []
     if (decls.length > 0 && decls.every(d => /[\\/]node_modules[\\/]/.test(d.getSourceFile().fileName))) return
     for (const p of checker.getPropertiesOfType(t)) {
       const d = p.valueDeclaration ?? p.declarations?.[0]
       if (d) walk(checker.getTypeOfSymbolAtLocation(p, d), `${path}.${p.name}`)
     }
+    for (const info of checker.getIndexInfosOfType(t)) {
+      walk(info.keyType, `${path}[key]`)
+      walk(info.type, `${path}[]`)
+    }
     for (const sig of [...t.getCallSignatures(), ...t.getConstructSignatures()]) {
+      for (const tp of sig.getTypeParameters() ?? []) walk(tp, `${path}<${tp.symbol.name}>`)
       for (const prm of sig.getParameters()) {
         const d = prm.valueDeclaration ?? prm.declarations?.[0]
         if (d) walk(checker.getTypeOfSymbolAtLocation(prm, d), `${path}(${prm.name})`)
@@ -853,6 +944,7 @@ function deepslateLeaksOf(program: ts.Program, file: string): string[] {
     }
   }
   for (const exported of checker.getExportsOfModule(mod)) {
+    seen = new Set<ts.Type>()
     const s = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported
     if (inside(s, DEEPSLATE)) leaks.add(`${exported.name}: deepslate の物そのもの`)
     const d = s.valueDeclaration ?? s.declarations?.[0]
@@ -900,6 +992,9 @@ describe('依存の向き (docs/architecture.md §1・§2)', () => {
     expect(star).toBe(0)
     expect(names).toEqual(PUBLIC_NAMES)
     expect(exportedNamesOf("export * from './x'\nexport * as y from './y'").star).toBe(2)
+    expect(exportedNamesOf('export default 42').names).toEqual(['default'])
+    expect(exportedNamesOf('export default function f() {}').names).toEqual(['default'])
+    expect(exportedNamesOf('export const a = 1, b = 2\nexport function c() {}').names).toEqual(['a', 'b', 'c'])
     expect(files.find(x => x.f === join('src', 'types.ts'))?.text).not.toMatch(/^import /m)
   })
 
@@ -914,5 +1009,32 @@ describe('依存の向き (docs/architecture.md §1・§2)', () => {
     const inside = deepslateLeaksOf(program, inner)
     expect(inside).toContain('BoardModel().structure: StructureProvider')
     expect(inside).toContain('Redraw.chunks<>: BlockPos')
+  }, 60_000)
+
+  it('型の見張りは、索引署名の値・型の引数の制約 (関数・interface・型の別名) へも降りる', () => {
+    // 盤面に置かない仮のファイル (view-3d の src の中にあるとして解く) を、手元の型検査器に渡す
+    const probe = join(VIEW_DIR, 'src', '__probe__.ts')
+    const text = [
+      "import type { BlockState } from 'deepslate/core'",
+      'export interface ByName { readonly [name: string]: BlockState }',
+      'export function pick<T extends BlockState>(name: string): string { return name }',
+      'export interface Box<T extends BlockState> { readonly label: string }',
+      'export type Alias<T extends BlockState = BlockState> = { readonly label: string }',
+      'export interface Clean { readonly [name: string]: string }',
+    ].join('\n')
+    const cfgPath = join(REPO_DIR, 'tsconfig.json')
+    const cfg = ts.parseJsonConfigFileContent(ts.readConfigFile(cfgPath, ts.sys.readFile).config, ts.sys, REPO_DIR)
+    const host = ts.createCompilerHost(cfg.options)
+    const getSourceFile = host.getSourceFile.bind(host)
+    host.getSourceFile = (name, lang, ...rest) =>
+      (resolve(name) === probe ? ts.createSourceFile(name, text, lang) : getSourceFile(name, lang, ...rest))
+    const fileExists = host.fileExists.bind(host)
+    host.fileExists = name => resolve(name) === probe || fileExists(name)
+    const program = ts.createProgram([probe], cfg.options, host)
+    const leaks = deepslateLeaksOf(program, probe)
+    for (const name of ['ByName', 'pick', 'Box', 'Alias']) {
+      expect(leaks.some(l => l.startsWith(name)), `${name}: ${leaks.join(' / ')}`).toBe(true)
+    }
+    expect(leaks.some(l => l.startsWith('Clean'))).toBe(false)
   }, 60_000)
 })

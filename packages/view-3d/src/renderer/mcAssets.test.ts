@@ -98,7 +98,6 @@ function stubImageDecoding(opts: { broken?: boolean } = {}) {
 const VANILLA = /^https:\/\/(raw\.githubusercontent\.com\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)\/|cdn\.jsdelivr\.net\/gh\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)@)/
 
 describe('既定はパック無し (#11)', () => {
-
   it('既定で fetch するのは mcmeta と PrismarineJS だけ (bundle・パックの JSON・パックのテクスチャを取りに行かない)', async () => {
     stubImageDecoding()
     // raw が落ちていて jsDelivr へ回る時も、パックへは行かない

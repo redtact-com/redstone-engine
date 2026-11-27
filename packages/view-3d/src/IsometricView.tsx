@@ -168,19 +168,52 @@ export interface ReleasableCanvas {
   getContext(contextId: 'webgl'): WebGLRenderingContext | null
 }
 
+/** DOM の変化を見張る口。変化のたびに `onChange` を呼び、見張りを止める関数を返す */
+export type WatchDom = (onChange: () => void) => () => void
+
+/** 文書の全体の変化 (付け外し) を MutationObserver で見張る */
+function watchDocument(doc: Document): WatchDom {
+  return onChange => {
+    const observer = new MutationObserver(onChange)
+    observer.observe(doc, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }
+}
+
 /**
- * canvas が DOM から外れていれば、WebGL の文脈を手放す (手放したら true)。
+ * canvas が DOM から外れたら、WebGL の文脈を手放す。もう外れていればすぐ手放し、
+ * まだつながっていれば外れるまで見張る。戻り値は見張りを止める関数 (effect がやり直す時に呼ぶ)。
  *
  * effect の片付けは unmount の時だけ走るとは限らない。React 19.2 の `<Activity mode="hidden">` は canvas を
- * DOM に残したまま片付けを走らせるので、そこで手放すと、戻した時に失った文脈で作り直してしまう。
- * 外れていない間は手放さない (StrictMode の付け直しも同じ canvas なので手放さない)。
+ * DOM に残したまま (display:none) 片付けを走らせ、戻すと同じ canvas で effect をやり直す。そこで手放すと、
+ * 戻した時に失った文脈で作り直してしまう。逆に、つながっているからと見送るだけだと、隠したまま外された時に
+ * 片付けが二度と走らず、文脈を最後まで手放さない。だから、つながっている間は外れるのを待つ。
  * 取れなかった (WebGL 非対応) なら何もしない。別の種類の文脈を作ってしまわないよう 'webgl' だけ見る
  * @internal 試験から呼ぶために書き出す (index.ts からは出さない)
  */
-export function releaseIfDetached(canvas: ReleasableCanvas): boolean {
-  if (canvas.isConnected) return false
-  canvas.getContext('webgl')?.getExtension('WEBGL_lose_context')?.loseContext()
-  return true
+export function releaseWhenDetached(canvas: ReleasableCanvas, watch: WatchDom): () => void {
+  const release = () => canvas.getContext('webgl')?.getExtension('WEBGL_lose_context')?.loseContext()
+  if (!canvas.isConnected) {
+    release()
+    return () => {}
+  }
+  let done = false
+  let stopWatching: () => void = () => {}
+  const check = () => {
+    if (done || canvas.isConnected) return
+    done = true
+    stopWatching()
+    release()
+  }
+  stopWatching = watch(check)
+  // 見張りを付けている間に外れた時 (watch が呼び返しをすぐ呼んだ時も) の取りこぼしを拾う
+  if (done) stopWatching()
+  else check()
+  return () => {
+    if (done) return
+    done = true
+    stopWatching()
+  }
 }
 
 // ─── コンポーネント ────────────────────────────────────────────────────────────
@@ -323,19 +356,23 @@ export function IsometricView({
   // 越えると古い文脈から失われて警告が出るので、unmount で WEBGL_lose_context を呼んで返す。
   // 資源の作り直し (名前が増えた・resourcePackUrl) では同じ文脈を使い続けるので、ここは unmount の時だけ。
   // StrictMode は同じ canvas のまま「外す → 付ける」をするので、タイマーで 1 拍置き、
-  // 付け直されたら取り消す。1 拍の後も canvas が DOM に残っていれば (Activity の hidden ほか) 手放さない (#11)
+  // 付け直されたら取り消す。1 拍の後も canvas が DOM に残っていれば (Activity の hidden ほか)、
+  // 外れるまで見張り、外れたら手放す。その前に effect がやり直せば (戻した時) 見張りを止める (#11)
   const releaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const stopReleaseWatchRef = useRef<(() => void) | null>(null)
   useEffect(() => {
     if (releaseTimerRef.current !== null) {
       clearTimeout(releaseTimerRef.current)
       releaseTimerRef.current = null
     }
+    stopReleaseWatchRef.current?.()
+    stopReleaseWatchRef.current = null
     const canvas = canvasRef.current
     return () => {
       if (!canvas) return
       releaseTimerRef.current = setTimeout(() => {
         releaseTimerRef.current = null
-        releaseIfDetached(canvas)
+        stopReleaseWatchRef.current = releaseWhenDetached(canvas, watchDocument(canvas.ownerDocument))
       }, CONTEXT_RELEASE_DELAY_MS)
     }
   }, [])

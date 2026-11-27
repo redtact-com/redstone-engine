@@ -12,17 +12,31 @@ export interface Camera {
 const DEFAULT_CAMERA: Camera = { rotX: 45, rotY: 45, distance: 20, panX: 0, panZ: 0 }
 const TOPDOWN_CAMERA: Camera = { rotX: 90, rotY: 0, distance: 25, panX: 0, panZ: 0 }
 
+/** 3D と真上の 2D を切り替えた時のカメラ。向きとパンは置き直し、寄り (distance) は引き継ぐ */
+export function cameraFor(topDown: boolean, distance: number): Camera {
+  return { ...(topDown ? TOPDOWN_CAMERA : DEFAULT_CAMERA), distance }
+}
+
+/** 最初のカメラ。移す元は 3D の既定から始め、effect で置き直していた (寄りは 3D の既定の 20) */
+export function initialCamera(topDown: boolean): Camera {
+  return cameraFor(topDown, DEFAULT_CAMERA.distance)
+}
+
 export function useCamera(topDown: boolean) {
-  const cameraRef = useRef<Camera>({ ...DEFAULT_CAMERA })
+  const cameraRef = useRef<Camera>(initialCamera(topDown))
   // 3D モード用ドラッグ
   const dragRef = useRef<{ x: number; y: number } | null>(null)
   // 2D モード用パンドラッグ（右クリック）
   const panDragRef = useRef<{ x: number; y: number } | null>(null)
+  /** 最後にカメラを合わせた topDown */
+  const placedForRef = useRef(topDown)
 
+  // **topDown が本当に変わった時だけ**置き直す (#11)。effect は Activity で隠して戻した時にもやり直すので、
+  // 毎回置き直すと、戻すたびに回転とパンが初めの値に戻っていた
   useEffect(() => {
-    cameraRef.current = topDown
-      ? { ...TOPDOWN_CAMERA, distance: cameraRef.current.distance }
-      : { ...DEFAULT_CAMERA, distance: cameraRef.current.distance }
+    if (placedForRef.current === topDown) return
+    placedForRef.current = topDown
+    cameraRef.current = cameraFor(topDown, cameraRef.current.distance)
   }, [topDown])
 
   // ── 3D モード: 左クリックドラッグで回転 ──────────────────────
