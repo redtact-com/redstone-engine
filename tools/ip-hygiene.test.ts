@@ -107,7 +107,59 @@ describe('著作権まわりの衛生 (docs/ip-policy.md)', () => {
     const hits = tracked().flatMap(f => BAD.filter(b => b.re.test(f)).map(b => `${f} [${b.name}]`))
     expect(hits, `ゲーム由来のファイルはコミットしない (docs/ip-policy.md §1)\n${hits.join('\n')}`).toEqual([])
   })
+
+  it('テクスチャ・モデル・リソースパック・ゲームのデータの抜き書きを追跡していない (docs/ip-policy.md §2)', () => {
+    const hits = assetHits(tracked())
+    expect(hits, `アセットは同梱しない。実行時に取得先から取る (docs/ip-policy.md §2)\n${hits.join('\n')}`).toEqual([])
+  })
+
+  // 見張りそのものの確かめ: 置き場の形を拾い、自前の絵・PR の画像・取り方のコードは拾わない
+  it('アセットの見張りは、パックとアセットの置き場を拾い、ほかの .png とコードは拾わない', () => {
+    for (const path of [
+      'apps/web/public/resourcepack/assets/minecraft/textures/block/stone.png',
+      'apps/web/public/resourcepack/bundle.json',
+      'apps/web/public/resource-packs/x/readme.txt',
+      'assets/minecraft/models/block/lever.json',
+      'packages/view-3d/test/blockstate-variants.1.21.4.json',
+      'packages/view-3d/test/blocks_states.json',
+      'packages/view-3d/test/blocks_models.json',
+      'pack/pack.mcmeta',
+      'x/textures/block/lever.png',
+      'x/textures/entity/chest/normal.png',
+      'x/models/block/lever.json',
+      'x/blockstates/lever.json',
+    ]) {
+      expect(assetHits([path]).length, path).toBeGreaterThan(0)
+    }
+    expect(assetHits([
+      '.github/pr-assets/11-view-3d/view-3d.png',
+      'apps/web/public/icon.png',
+      'packages/view-3d/src/renderer/texturePaths.ts',
+      'packages/view-3d/src/renderer/mcAssets.ts',
+      'packages/view-3d/src/renderer/assetSources.ts',
+      'docs/assets.md',
+    ])).toEqual([])
+  })
 })
+
+/**
+ * テクスチャ・モデル・リソースパックと、ゲームのデータの抜き書きの置き場 (#11)。
+ * 取り方 (misode/mcmeta・PrismarineJS/minecraft-assets から実行時に取る) は packages/view-3d の renderer にある。
+ * 自前の絵と PR の画像 (.github/pr-assets) があるので、.png の全部は禁じない。
+ */
+const ASSET_PLACES: { name: string; re: RegExp }[] = [
+  { name: 'アセットの置き場 (assets/minecraft/)', re: /(^|\/)assets\/minecraft\// },
+  { name: 'リソースパックの置き場', re: /(^|\/)resource-?packs?\//i },
+  { name: 'パックの束 (bundle.json)', re: /(^|\/)bundle\.json$/ },
+  { name: 'パックの説明 (.mcmeta)', re: /\.mcmeta$/ },
+  { name: 'blockstates と models の束 (PrismarineJS)', re: /(^|\/)blocks_(states|models)\.json$/ },
+  { name: 'blockstates・models・textures の置き場', re: /(^|\/)(blockstates|models\/(block|item)|textures\/(block|item|entity))\// },
+  { name: 'variant の表 (ゲームのデータの抜き書き)', re: /(^|\/)blockstate-variants[^/]*$/ },
+]
+
+function assetHits(paths: string[]): string[] {
+  return paths.flatMap(f => ASSET_PLACES.filter(p => p.re.test(f)).map(p => `${f} [${p.name}]`))
+}
 
 /** unsafe の置き場 (#9) */
 const UNSAFE = {

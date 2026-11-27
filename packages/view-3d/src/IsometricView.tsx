@@ -1,28 +1,29 @@
 /**
- * IsometricView — WorldSnapshot を deepslate で描画する React コンポーネント。
+ * IsometricView — 盤面 (blockstate の文字列) を deepslate で描く React の部品。
  *
- * snapshot が変化するたびに setStructure() で GPU バッファを再構築する。
+ * - 盤面は `board` (範囲と「`"x,y,z"` → 文字列」の表) で受け、変化は `viewRef` の `applyChanges` で受ける。
+ *   どちらも描く盤面 (board-to-structure.ts の BoardModel) へ当て、変わったマスのチャンクだけを作り直す。
+ * - 読み込み中 (資源を作っている間) に来た盤面と変化も捨てない。準備ができた時の盤面から構造を作る。
+ * - 3D で押せる物はアプリが `pickRole` で決める。座標は 3D でも真上からの 2D でも世界の座標。
+ *
+ * 移す元は redstone-sim の packages/viewer/src/IsometricView.tsx (develop a40ae23)。
  */
 
-import { useEffect, useRef, useState, useCallback } from 'react'
-import { Structure, StructureRenderer } from 'deepslate/render'
-import type { WorldSnapshot } from '@redstone/sim'
-import type { Pos3D } from '@redstone/sim'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import type * as React from 'react'
+import { StructureRenderer } from 'deepslate/render'
+import { BoardModel, type ModelUpdate } from './board-to-structure'
+import type { ApplyResult, Board, CellChange, PickRoleFn, Pos3 } from './types'
+import { buildResources, type AssetState } from './renderer/buildResources'
+import { fitDistance, maxZoomOut } from './camera'
+import { useCamera } from './renderer/useCamera'
+import { canvasPixelToBlock, FOV_F } from './renderer/coordUtils'
 import {
-  worldSnapshotToStructure,
-  VIEWER_PRELOAD_BLOCKS,
-  extraPreloadNames,
-} from './world-to-structure.js'
-import { buildResources, type AssetState } from './renderer/buildResources.js'
-import { fitDistance, maxZoomOut } from './camera.js'
-import { useCamera } from './renderer/useCamera.js'
-import { canvasPixelToBlock, FOV_F } from './renderer/coordUtils.js'
-import {
-  viewMatrixOf, projMatrixOf, canvasRay, pointToCanvas, pickCell, pickRoleOf, pickNearest,
+  viewMatrixOf, projMatrixOf, canvasRay, pointToCanvas, pickCell, pickNearest, pickRoleFrom,
   TOUCH_PICK_RADII,
-} from './renderer/picking.js'
+} from './renderer/picking'
 
-// ─── 3D のクリック・タップの見分け (#397) ────────────────────────────────────
+// ─── 3D のクリック・タップの見分け (redstone-sim#397) ─────────────────────────
 
 /** クリック・タップとみなす動きの上限 (CSS px)。越えたらドラッグ (カメラ回転) */
 const CLICK_SLOP_MOUSE = 5
@@ -30,26 +31,10 @@ const CLICK_SLOP_TOUCH = 10
 /** タッチでこれより長く押したらタップにしない (長押し)。マウスは時間を見ない */
 const TAP_MAX_MS_TOUCH = 500
 
-// ─── Props ────────────────────────────────────────────────────────────────────
+/** `pickRole` を渡さない時: 何も押せない (素通りの一覧のほかは遮る) */
+const NO_TARGETS: PickRoleFn = pickRoleFrom(() => false)
 
-/**
- * 2 つのスナップショットが**中身として同じ**か (#272)。
- *
- * `EditorPage` の snapshot は毎レンダ新しいオブジェクトリテラルなので参照比較は効かない。
- * ブロックは sim / editor のどちらも**書き換えず新しいオブジェクトを作る**ので、
- * エントリごとの参照比較で十分 (深い比較は 6000 ブロックで重すぎる)。
- */
-function sameSnapshot(a: WorldSnapshot | null, b: WorldSnapshot): boolean {
-  if (a === b) return true
-  if (a === null) return false
-  const ab = a.bounds, bb = b.bounds
-  if (ab.x[0] !== bb.x[0] || ab.x[1] !== bb.x[1]
-    || ab.y[0] !== bb.y[0] || ab.y[1] !== bb.y[1]
-    || ab.z[0] !== bb.z[0] || ab.z[1] !== bb.z[1]) return false
-  if (a.blocks.size !== b.blocks.size) return false
-  for (const [k, v] of a.blocks) if (b.blocks.get(k) !== v) return false
-  return true
-}
+// ─── Props ────────────────────────────────────────────────────────────────────
 
 export interface CameraState {
   distance: number
@@ -66,38 +51,59 @@ export interface CameraInput {
   rotY?: number
 }
 
-/** IsometricView を外から命令的に使う口 (#397)。`viewRef` に入る */
+/** IsometricView を外から命令的に使う口 (redstone-sim#397)。`viewRef` に入る */
 export interface IsometricViewHandle {
   /**
-   * ブロックの中心が画面のどこに描かれているか (clientX/Y)。座標は snapshot の座標。
+   * ブロックの中心が画面のどこに描かれているか (clientX/Y)。座標は世界の座標。
    * 描画の準備ができていない・カメラの後ろなら null。
    * e2e が実際の座標をクリック・タップして確かめるために使う
    */
-  blockToClient: (pos: Pos3D) => { x: number; y: number } | null
+  blockToClient: (pos: Pos3) => { x: number; y: number } | null
   /**
-   * 次のフレームで 1 回描く (#434)。`frameLoop="demand"` の間に、ビューアが自分では気づけない
+   * 次のフレームで 1 回描く (redstone-sim#434)。`frameLoop="demand"` の間に、ビューアが自分では気づけない
    * 変更 (`cameraInputRef` に値を入れた、など) を伝えるために呼ぶ。`"always"` では何もしなくてよい
    */
   invalidate: () => void
+  /**
+   * 変化の列 (1 件は `{ x, y, z, state }`。座標は世界の座標) を描く盤面へ当てる。
+   * 列は呼んだその場で読み切る。engine-js の変化の窓は次に窓口を呼ぶと使えないので、窓そのものは渡さない
+   * (`StateTable.name` で文字列にした列を渡す。docs/wasm-abi.md §4)。
+   * 範囲の外の変化は描かずに数を返す。読み込み中に呼んでも捨てず、準備ができた時に描く
+   */
+  applyChanges: (changes: Iterable<CellChange>) => ApplyResult
+  /** いま描いているマスの状態 (正規化した文字列。`normalizeState` の形)。空か範囲の外なら null。テスト用 */
+  stateAt: (pos: Pos3) => string | null
 }
 
 export interface IsometricViewProps {
-  /** 表示対象のスナップショット */
-  snapshot: WorldSnapshot
+  /**
+   * 描く盤面。変わったら、いま描いている盤面と文字列で比べ、範囲が同じなら違うマスだけを直す
+   * (範囲が違えば丸ごと作り直し、寄りも合わせ直す)。`applyChanges` で当てた分も、この盤面に合わせて比べ直す。
+   * 同じ物 (参照) を渡し直しても何もしない
+   */
+  board: Board
+  /**
+   * 先に資源を作るブロックの名前 (アプリが状態表のブロックの名前を渡す)。盤面と変化に出た名前は自分で集め、
+   * 知らない名前が出たら資源を作り直す (redstone-sim#234 の安全網)。`minecraft:` とプロパティは有ってもよい
+   */
+  preloadNames?: readonly string[]
+  /**
+   * 3D で押した時のマスの扱い。受ける文字列は正規化した blockstate の文字列で、空のマスでは呼ばない。
+   * 押せる物だけを決めるなら `pickRoleFrom(isTarget)` で作る。省くと何も押せない
+   */
+  pickRole?: PickRoleFn
   /** true にすると真上からの 2D ビュー */
   topDown?: boolean
   /**
-   * クリック・タップされたブロック座標を通知するコールバック。
+   * クリック・タップされたブロックの座標を知らせる。**座標は世界の座標** (盤面の鍵と同じ)。
    *
-   * - topDown=true: 左右クリックを区別して返す。座標の x/z は**構造ローカル**
-   *   (snapshot の bounds の min が原点)、y は placementY
-   * - topDown=false (3D, #397): 押せる素子 (isTriggerableType) に当たったときだけ 'left' で返す。
-   *   座標は **snapshot の座標** (bounds の min を足してある) なので、そのまま sim に渡せる。
+   * - topDown=true: 左右クリックを区別して返す。y は placementY
+   * - topDown=false (3D, redstone-sim#397): `pickRole` が target と言ったマスに当たった時だけ 'left' で返す。
    *   ドラッグ (カメラ回転)・ピンチ・タッチの長押しでは呼ばない。
    *   渡さなければ、3D ではピックもカーソルの変更もしない
    */
-  onBlockClick?: (pos: Pos3D, button: 'left' | 'right') => void
-  /** 2D モード時にクリック判定に使う Y レイヤー */
+  onBlockClick?: (pos: Pos3, button: 'left' | 'right') => void
+  /** 2D の時にクリックの判定に使う層の y (世界の座標)。省くと範囲の下から 2 段目 */
   placementY?: number
   /**
    * topDown グリッドオーバーレイ用。
@@ -111,12 +117,15 @@ export interface IsometricViewProps {
    * 適用され null に消費される (デモの fitCamera など)。
    */
   cameraInputRef?: React.MutableRefObject<CameraInput | null>
-  /** テクスチャ読込 + 初回 Structure 構築が完了して描画可能になった時に一度呼ぶ。 */
+  /**
+   * テクスチャ読込 + 構造の構築が済み、最初の絵を描いた時に呼ぶ (資源を作り直すたびに 1 回)。
+   * 読み込み中の変化は捨てないので、ここで描き直しを頼まなくてよい (redstone-sim#109 の描き直しは要らない)
+   */
   onReady?: () => void
-  /** 命令的な口 (#397)。ref を渡すと、マウント中は中身が入る (cameraInputRef と同じ形) */
+  /** 命令的な口 (redstone-sim#397)。ref を渡すと、マウント中は中身が入る (cameraInputRef と同じ形) */
   viewRef?: React.MutableRefObject<IsometricViewHandle | null>
   /**
-   * 操作を受けるか (#434)。既定は true (今までどおり)。
+   * 操作を受けるか (redstone-sim#434)。既定は true (今までどおり)。
    *
    * false の間は wheel と touch を奪わない: wheel を止めず (ビューアの上でもページが流れる)、
    * `touch-action` を外し (指でなぞるとページが流れる)、ドラッグ・ピンチ・クリックにも反応しない。
@@ -125,16 +134,17 @@ export interface IsometricViewProps {
    */
   interactive?: boolean
   /**
-   * カスタムリソースパックの基点 URL (#434)。既定は `/resourcepack` (エディタと同じ)。
-   * 基点の下に `bundle.json` と `assets/minecraft/...` を置く。変えると資源を取り直して作り直す
+   * リソースパックの基点 URL (redstone-sim#434)。**既定は無し** (#11): パックへは取りに行かず、
+   * mcmeta と PrismarineJS だけから描く。渡すと、基点の下の `bundle.json` と `assets/minecraft/...` を先に試す。
+   * 変えると資源を取り直して作り直す
    */
   resourcePackUrl?: string
   /**
-   * いつ描くか (#434)。
+   * いつ描くか (redstone-sim#434)。
    * - `"always"` (既定・今までどおり): 毎フレーム描く
    * - `"demand"`: 絵が変わりうる時だけ描き、止まっている間は requestAnimationFrame を回さない。
-   *   描くのは snapshot・`topDown`・`placementY` の変化、ビューア上の操作 (ドラッグ・ピンチ・wheel)、
-   *   canvas の大きさの変化、`viewRef` の `invalidate()` を呼んだ時。
+   *   描くのは board と applyChanges で盤面が変わった時・`topDown`・`placementY` の変化、ビューア上の操作
+   *   (ドラッグ・ピンチ・wheel)、canvas の大きさの変化、`viewRef` の `invalidate()` を呼んだ時。
    *   **`cameraInputRef` は自分では見張らない**ので、値を入れたら `invalidate()` を呼ぶ。
    *   `cameraStateRef` は描いた時にだけ更新される
    */
@@ -150,10 +160,12 @@ const CONTEXT_RELEASE_DELAY_MS = 0
 // ─── コンポーネント ────────────────────────────────────────────────────────────
 
 export function IsometricView({
-  snapshot,
+  board,
+  preloadNames,
+  pickRole,
   topDown = false,
   onBlockClick,
-  placementY = 1,
+  placementY,
   cameraStateRef,
   panMode = false,
   cameraInputRef,
@@ -164,13 +176,20 @@ export function IsometricView({
   frameLoop = 'always',
 }: IsometricViewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  // init effect は deps=[] で一度だけ張るため、最新の onReady を ref 経由で読む
+  // init effect は資源が変わった時だけ張り直すため、最新の onReady を ref 経由で読む
   const onReadyRef = useRef(onReady)
   onReadyRef.current = onReady
+  const pickRoleRef = useRef<PickRoleFn>(pickRole ?? NO_TARGETS)
+  pickRoleRef.current = pickRole ?? NO_TARGETS
   const rendererRef = useRef<StructureRenderer | null>(null)
-  const structureRef = useRef<Structure | null>(null)
-  const prevSnapshotRef = useRef<WorldSnapshot | null>(null)
-  // ─── 描くタイミング (#434) ─────────────────────────────────────────────────
+
+  // ─── 描く盤面 (#11) ────────────────────────────────────────────────────────
+  // React と WebGL の外のクラスに持つ。盤面の差し替え・applyChanges・読み込み中の変化を全部ここへ当てる
+  const [model] = useState(() => new BoardModel(board))
+  /** 最後に model へ当てた board。同じ物を渡し直されたら比べない */
+  const appliedBoardRef = useRef(board)
+
+  // ─── 描くタイミング (redstone-sim#434) ─────────────────────────────────────
   /** 予約済みの requestAnimationFrame の ID。0 = 予約なし (止まっている) */
   const animFrameRef = useRef<number>(0)
   /** 今の文脈で 1 フレーム描く関数。初期化が済むまでと、外した後は null */
@@ -188,24 +207,30 @@ export function IsometricView({
       drawRef.current?.()
     })
   }, [])
-  /** 最後に寄りを合わせたときの回路サイズ ("x,y,z")。変わったら合わせ直す (#238) */
+  /** 最後に寄りを合わせたときの回路サイズ ("x,y,z")。変わったら合わせ直す (redstone-sim#238) */
   const fittedSizeRef = useRef<string>('')
   /**
-   * 外部 (デモの setCamera 等) がカメラを指定したか (#238)。
+   * 外部 (デモの setCamera 等) がカメラを指定したか (redstone-sim#238)。
    *
    * **自動フィットはテクスチャ読み込みを待ってから走る**ので、外から距離を指定しても
    * あとから上書きされて効かなかった。一度でも外部指定があったら自動フィットは譲る
    */
   const externalCameraRef = useRef(false)
 
-  /** 引ける上限。**回路の大きさに追従させる** — 固定 200 だと大きい回路で引ききれない (#238) */
-  const zoomLimit = (): number => {
-    const s = structureRef.current?.getSize()
-    return s === undefined ? 200 : maxZoomOut(s as [number, number, number])
-  }
+  /** 構造の大きさ (構造ローカル。範囲の各軸の数) */
+  const sizeOf = useCallback(() => model.structure.getSize() as [number, number, number], [model])
+
+  /** 引ける上限。**回路の大きさに追従させる** — 固定 200 だと大きい回路で引ききれない (redstone-sim#238) */
+  const zoomLimit = (): number => (rendererRef.current ? maxZoomOut(sizeOf()) : 200)
+
+  /** 2D の層の y を構造ローカルにする。省いた時は下から 2 段目 (移す元の既定の 1 と同じ) */
+  const localPlacementY = useCallback(
+    () => (placementY === undefined ? 1 : placementY - model.min[1]),
+    [placementY, model],
+  )
 
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading')
-  /** テクスチャがどこまで取れたか (#395)。full 以外なら盤面の左下に一言出す */
+  /** テクスチャがどこまで取れたか (redstone-sim#395)。full 以外なら盤面の左下に一言出す */
   const [assets, setAssets] = useState<AssetState>('full')
   const [loadingMsg, setLoadingMsg] = useState('Loading textures...')
   const [errorMsg, setErrorMsg] = useState('')
@@ -220,6 +245,19 @@ export function IsometricView({
     onWheel3D,
     getPanScale,
   } = useCamera(topDown)
+
+  /** **大きさが変わったら寄り直す** (redstone-sim#238)。外から指定されていたらそちらを尊重する (上書きしない) */
+  const fitToSize = useCallback(() => {
+    const size = sizeOf()
+    const key = size.join(',')
+    if (key === fittedSizeRef.current) return
+    fittedSizeRef.current = key
+    if (externalCameraRef.current) return
+    const canvas = canvasRef.current
+    cameraRef.current.distance = fitDistance(size, {
+      aspect: canvas ? canvas.clientWidth / Math.max(1, canvas.clientHeight) : 1,
+    })
+  }, [sizeOf, cameraRef])
 
   // useCamera が topDown の切り替えでカメラを置き直す (この effect はその後に走る)。
   // placementY は 2D の当たり判定にしか使わないが、呼び出し側が層の絵と一緒に変えるので拾っておく。
@@ -244,10 +282,10 @@ export function IsometricView({
     return () => document.removeEventListener('visibilitychange', onVisible)
   }, [requestDraw])
 
-  // ─── WebGL の文脈を手放す (#434) ───────────────────────────────────────────
+  // ─── WebGL の文脈を手放す (redstone-sim#434) ───────────────────────────────
   // canvas を DOM から外しても、文脈は GC されるまで残る。ブラウザの上限 (Chrome は 16) を
   // 越えると古い文脈から失われて警告が出るので、unmount で WEBGL_lose_context を呼んで返す。
-  // 資源の作り直し (extraKey) では同じ文脈を使い続けるので、ここは unmount の時だけ。
+  // 資源の作り直し (名前が増えた・resourcePackUrl) では同じ文脈を使い続けるので、ここは unmount の時だけ。
   // StrictMode は同じ canvas のまま「外す → 付ける」をするので、タイマーで 1 拍置き、
   // 付け直されたら取り消す
   const releaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -267,12 +305,70 @@ export function IsometricView({
     }
   }, [])
 
+  // ─── 資源を作る名前 (redstone-sim#234 → #11) ──────────────────────────────
+  // preloadNames と、盤面と変化に出た名前を合わせる。名前は増えるだけで、知らない名前が出た時だけ
+  // resourceKey を動かし、下の初期化を作り直す (渡さないと、そのブロックは**エラーも出さずに消えて見える**)
+  const preloadRef = useRef<readonly string[]>(preloadNames ?? [])
+  preloadRef.current = preloadNames ?? []
+  const [initialNames] = useState(() => model.resourceNames(preloadNames ?? []))
+  const resourceNamesRef = useRef<readonly string[]>(initialNames)
+  const [resourceKey, setResourceKey] = useState(() => initialNames.join(' '))
+
+  /** 名前が増えたら資源を作り直す。作り直すなら true */
+  const syncNames = useCallback((): boolean => {
+    const merged = model.resourceNames([...resourceNamesRef.current, ...preloadRef.current])
+    // 今の名前を全部含めて合わせたので、増えたかは数で分かる
+    if (merged.length === resourceNamesRef.current.length) return false
+    resourceNamesRef.current = merged
+    setResourceKey(merged.join(' '))
+    return true
+  }, [model])
+
+  useEffect(() => { syncNames() }, [preloadNames, syncNames])
+
+  // ─── 描く盤面の変化を絵へ当てる (#11) ──────────────────────────────────────
+  /**
+   * BoardModel が返した「何を作り直すか」に従う。
+   * - 知らない名前が出た: 資源を作り直す (作り直した時に、その時の盤面から構造を作る)
+   * - 読み込み中: 何もしない (準備ができた時に、その時の盤面から構造を作る)
+   * - 範囲が変わった: setStructure (グリッドも作り直す) と寄りの合わせ直し
+   * - それ以外: 変わったマスのチャンク (と、面で接する隣のチャンク) だけ。違いが多ければ全部
+   */
+  const handleUpdate = useCallback((u: ModelUpdate) => {
+    if (u.newNames.length > 0 && syncNames()) return
+    const renderer = rendererRef.current
+    if (!renderer || u.redraw.kind === 'none') return
+    if (u.redraw.kind === 'chunks') {
+      renderer.updateStructureBuffers(u.redraw.chunks.map(c => [c[0], c[1], c[2]]))
+    } else if (u.redraw.resized) {
+      renderer.setStructure(model.structure)
+      fitToSize()
+    } else {
+      renderer.updateStructureBuffers()
+    }
+    requestDraw()
+  }, [model, syncNames, fitToSize, requestDraw])
+
+  useEffect(() => {
+    if (appliedBoardRef.current === board) return
+    appliedBoardRef.current = board
+    handleUpdate(model.setBoard(board))
+  }, [board, model, handleUpdate])
+
+  const applyChanges = useCallback((changes: Iterable<CellChange>): ApplyResult => {
+    const u = model.applyChanges(changes)
+    handleUpdate(u)
+    return { changed: u.changed, outside: u.outside }
+  }, [model, handleUpdate])
+
+  const stateAt = useCallback((pos: Pos3) => model.stateAt(pos[0], pos[1], pos[2]), [model])
+
   // ─── ピンチ状態 ────────────────────────────────────────────────────────────
   const activePointers = useRef<Map<number, {x: number; y: number}>>(new Map())
   const lastPinchDist = useRef<number | null>(null)
   const lastPinchMid  = useRef<{x: number; y: number} | null>(null)
 
-  // ─── 3D の 1 回の操作 (#397) ───────────────────────────────────────────────
+  // ─── 3D の 1 回の操作 (redstone-sim#397) ───────────────────────────────────
   /**
    * 押してから離すまで。**押した時点ではまだ何もしない**。
    * 動いた量がしきい値を越えたらドラッグ (カメラ回転)、越えずに離したらクリック・タップ。
@@ -297,44 +393,43 @@ export function IsometricView({
 
   // ─── ヒットテスト (2D モード) ──────────────────────────────────────────────
 
+  /** 画面の点の、今の層のマス。**世界の座標** (構造ローカルに範囲の最小を足す) */
   const hitBlock = useCallback(
-    (clientX: number, clientY: number): Pos3D | null => {
+    (clientX: number, clientY: number): Pos3 | null => {
       const canvas = canvasRef.current
-      const structure = structureRef.current
-      if (!canvas || !structure) return null
+      if (!canvas || !rendererRef.current) return null
       const rect = canvas.getBoundingClientRect()
       const cam = cameraRef.current
-      return canvasPixelToBlock(
+      const local = canvasPixelToBlock(
         clientX - rect.left,
         clientY - rect.top,
         canvas.clientWidth,
         canvas.clientHeight,
-        structure.getSize() as [number, number, number],
+        sizeOf(),
         cam.distance,
-        placementY,
+        localPlacementY(),
         cam.panX,
         cam.panZ,
       )
+      if (!local) return null
+      const min = model.min
+      return [local[0] + min[0], local[1] + min[1], local[2] + min[2]]
     },
-    [cameraRef, placementY],
+    [cameraRef, sizeOf, localPlacementY, model],
   )
 
-  // ─── ピック (3D モード, #397) ──────────────────────────────────────────────
+  // ─── ピック (3D モード, redstone-sim#397) ──────────────────────────────────
 
   /**
-   * 今描いている絵の行列と盤面。ピックと blockToClient が使う。描画の準備前は null。
-   *
-   * ブロックは**今描いている構造を作った snapshot** (prevSnapshotRef) から引く。
-   * props の snapshot は 1 レンダ先に進んでいることがある。
+   * 今描いている絵の行列と盤面の大きさ・原点。ピックと blockToClient が使う。描画の準備前は null。
+   * 盤面は描く盤面 (model) から引く。絵とは同じ呼び出しの中で一緒に直すので、ずれない
    */
   const currentView = useCallback(() => {
     const canvas = canvasRef.current
-    const structure = structureRef.current
-    const snap = prevSnapshotRef.current
-    if (!canvas || !structure || !snap || !rendererRef.current) return null
+    if (!canvas || !rendererRef.current) return null
     const rect = canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0 || canvas.clientHeight <= 0) return null
-    const size = structure.getSize()
+    const size = sizeOf()
     return {
       left: rect.left,
       top: rect.top,
@@ -342,38 +437,36 @@ export function IsometricView({
       w: rect.width,
       h: rect.height,
       size,
-      snap,
+      min: model.min,
       vm: viewMatrixOf(cameraRef.current, size),
       pm: projMatrixOf(canvas.clientWidth / canvas.clientHeight),
     }
-  }, [cameraRef])
+  }, [cameraRef, sizeOf, model])
 
-  /** 画面の点 (clientX/Y) の光線で、最初に当たる押せる素子。座標は snapshot の座標 */
+  /** 画面の点 (clientX/Y) の光線で、最初に当たる押せる素子。座標は世界の座標 */
   const pick3D = useCallback(
-    (clientX: number, clientY: number): Pos3D | null => {
+    (clientX: number, clientY: number): Pos3 | null => {
       const view = currentView()
       if (!view) return null
       const ray = canvasRay(clientX - view.left, clientY - view.top, view.w, view.h, view.vm, view.pm)
       if (!ray) return null
-      const { snap } = view
-      const [minX] = snap.bounds.x, [minY] = snap.bounds.y, [minZ] = snap.bounds.z
-      const hit = pickCell(ray, view.size, (x, y, z) =>
-        pickRoleOf(snap.blocks.get(`${x + minX},${y + minY},${z + minZ}`)))
-      return hit ? [hit[0] + minX, hit[1] + minY, hit[2] + minZ] : null
+      // 役は描く盤面の文字列で決める。空のマスでは pickRole を呼ばない
+      const hit = pickCell(ray, view.size, (x, y, z) => {
+        const state = model.stateAtLocal(x, y, z)
+        return state === null ? null : pickRoleRef.current(state)
+      })
+      const { min } = view
+      return hit ? [hit[0] + min[0], hit[1] + min[1], hit[2] + min[2]] : null
     },
-    [currentView],
+    [currentView, model],
   )
 
   const blockToClient = useCallback(
-    (pos: Pos3D): { x: number; y: number } | null => {
+    (pos: Pos3): { x: number; y: number } | null => {
       const view = currentView()
       if (!view) return null
-      const { snap } = view
-      const p = [
-        pos[0] - snap.bounds.x[0] + 0.5,
-        pos[1] - snap.bounds.y[0] + 0.5,
-        pos[2] - snap.bounds.z[0] + 0.5,
-      ]
+      const { min } = view
+      const p = [pos[0] - min[0] + 0.5, pos[1] - min[1] + 0.5, pos[2] - min[2] + 0.5]
       const c = pointToCanvas(p, view.w, view.h, view.vm, view.pm)
       return c ? { x: view.left + c.x, y: view.top + c.y } : null
     },
@@ -382,7 +475,7 @@ export function IsometricView({
 
   /** クリック・タップした点のピック。タッチは外れても周り (半径 6px と 12px) を探す */
   const pickForTap = useCallback(
-    (clientX: number, clientY: number, touch: boolean): Pos3D | null =>
+    (clientX: number, clientY: number, touch: boolean): Pos3 | null =>
       pickNearest(clientX, clientY, pick3D, blockToClient, touch ? TOUCH_PICK_RADII : []),
     [pick3D, blockToClient],
   )
@@ -399,12 +492,12 @@ export function IsometricView({
 
   useEffect(() => {
     if (!viewRef) return
-    const handle: IsometricViewHandle = { blockToClient, invalidate: requestDraw }
+    const handle: IsometricViewHandle = { blockToClient, invalidate: requestDraw, applyChanges, stateAt }
     viewRef.current = handle
     return () => {
       if (viewRef.current === handle) viewRef.current = null
     }
-  }, [viewRef, blockToClient, requestDraw])
+  }, [viewRef, blockToClient, requestDraw, applyChanges, stateAt])
 
   // ─── ポインターイベント ────────────────────────────────────────────────────
 
@@ -430,7 +523,7 @@ export function IsometricView({
 
       // 1本指
       if (!topDown) {
-        // 3D: 押した時点ではまだ回さない。動いた量で、ドラッグかクリックかを決める (#397)
+        // 3D: 押した時点ではまだ回さない。動いた量で、ドラッグかクリックかを決める (redstone-sim#397)
         gestureRef.current = {
           id: e.pointerId,
           x: e.clientX,
@@ -473,24 +566,25 @@ export function IsometricView({
           const scale   = lastPinchDist.current / dist
           const newDist = Math.max(3, Math.min(zoomLimit(), cam.distance * scale))
 
-          if (topDown && structureRef.current) {
+          if (topDown && rendererRef.current) {
             const canvas = canvasRef.current
             if (canvas) {
-              // zoom-to-cursor（ピンチ中点を基準）
+              // zoom-to-cursor（ピンチ中点を基準）。層の y は構造ローカル
               const rect   = canvas.getBoundingClientRect()
               const px     = mid.x - rect.left
               const py     = mid.y - rect.top
               const w      = canvas.clientWidth
               const h      = canvas.clientHeight
-              const [sx, sy, sz] = structureRef.current.getSize() as [number, number, number]
+              const [sx, sy, sz] = sizeOf()
+              const layerY = localPlacementY()
               const aspect = w / h
-              const depth  = cam.distance + sy / 2 - placementY
+              const depth  = cam.distance + sy / 2 - layerY
               const ndcX   = (2 * px / w) - 1
               const ndcY   = 1 - (2 * py / h)
               const wx0    = ndcX * aspect * depth / FOV_F + sx / 2 + cam.panX
               const wz0    = sz / 2 - ndcY * depth / FOV_F + cam.panZ
               cam.distance = newDist
-              const nd     = newDist + sy / 2 - placementY
+              const nd     = newDist + sy / 2 - layerY
               cam.panX    += wx0 - (ndcX * aspect * nd / FOV_F + sx / 2 + cam.panX)
               cam.panZ    += wz0 - (sz / 2 - ndcY * nd / FOV_F + cam.panZ)
 
@@ -538,14 +632,16 @@ export function IsometricView({
       const pos = hitBlock(e.clientX, e.clientY)
       if (pos) onBlockClick(pos, 'left')
     },
-    [interactive, requestDraw, topDown, panMode, onBlockClick, hitBlock, onMouseDown, onMouseMove, onRightMouseMove, placementY, cameraRef, getPanScale, updateHover],
+    // zoomLimit は描く盤面 (model) と rendererRef だけを読むので、deps に入れない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [interactive, requestDraw, topDown, panMode, onBlockClick, hitBlock, onMouseDown, onMouseMove, onRightMouseMove, localPlacementY, sizeOf, cameraRef, getPanScale, updateHover],
   )
 
   /** pointerup に加えて pointerleave と pointercancel でも呼ぶ */
   const handlePointerUp = useCallback(
     (e: React.PointerEvent) => {
       if (!interactive) return
-      // 3D: しきい値の内側で離したらクリック・タップ (#397)
+      // 3D: しきい値の内側で離したらクリック・タップ (redstone-sim#397)
       const g = gestureRef.current
       if (!topDown && g && g.id === e.pointerId) {
         gestureRef.current = null
@@ -572,7 +668,7 @@ export function IsometricView({
     [interactive, topDown, onBlockClick, pickForTap, onMouseUp, onRightMouseUp],
   )
 
-  // 操作の途中で interactive が false になったら、押しかけ・回しかけを全部捨てる (#434)
+  // 操作の途中で interactive が false になったら、押しかけ・回しかけを全部捨てる (redstone-sim#434)
   useEffect(() => {
     if (interactive) return
     activePointers.current.clear()
@@ -603,31 +699,31 @@ export function IsometricView({
 
   useEffect(() => {
     const canvas = canvasRef.current
-    // interactive=false の間は listener を付けない (#434)。preventDefault しないのでページが流れる
+    // interactive=false の間は listener を付けない (redstone-sim#434)。preventDefault しないのでページが流れる
     if (!canvas || !interactive) return
 
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault()
       requestDraw()
       const cam = cameraRef.current
-      const structure = structureRef.current
 
-      if (!topDown || !structure) {
+      if (!topDown || !rendererRef.current) {
         cam.distance = Math.max(3, Math.min(zoomLimit(), cam.distance + e.deltaY * 0.05))
         return
       }
 
-      // zoom-to-cursor
+      // zoom-to-cursor。層の y は構造ローカル
       const rect = canvas.getBoundingClientRect()
       const px = e.clientX - rect.left
       const py = e.clientY - rect.top
       const w = canvas.clientWidth
       const h = canvas.clientHeight
-      const [sx, sy, sz] = structure.getSize() as [number, number, number]
+      const [sx, sy, sz] = sizeOf()
+      const layerY = localPlacementY()
       const aspect = w / h
       const oldDist = cam.distance
 
-      const depth = oldDist + sy / 2 - placementY
+      const depth = oldDist + sy / 2 - layerY
       const ndcX = (2 * px / w) - 1
       const ndcY = 1 - (2 * py / h)
       const wx0 = ndcX * aspect * depth / FOV_F + sx / 2 + cam.panX
@@ -636,7 +732,7 @@ export function IsometricView({
       const factor = 1 + e.deltaY * 0.001
       cam.distance = Math.max(3, Math.min(zoomLimit(), oldDist * factor))
 
-      const newDepth = cam.distance + sy / 2 - placementY
+      const newDepth = cam.distance + sy / 2 - layerY
       const wx1 = ndcX * aspect * newDepth / FOV_F + sx / 2 + cam.panX
       const wz1 = sz / 2 - ndcY * newDepth / FOV_F + cam.panZ
 
@@ -646,26 +742,11 @@ export function IsometricView({
 
     canvas.addEventListener('wheel', handleWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', handleWheel)
-  }, [topDown, placementY, cameraRef, interactive, requestDraw])
+    // zoomLimit は描く盤面 (model) と rendererRef だけを読むので、deps に入れない
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topDown, localPlacementY, sizeOf, cameraRef, interactive, requestDraw])
 
-  // ─── プリロードに無いブロック名の収集 (#234) ──────────────────────────────
-  // 装飾は取り込み元の名前をそのまま持つので固定表に列挙できない。ここで拾って
-  // buildResources に渡さないと**エラーも出さずに消えて見える**。名前が増えたときだけ
-  // extraKey を動かし、下の初期化を作り直す
-  const extraNamesRef = useRef<string[]>([])
-  const [extraKey, setExtraKey] = useState('')
-
-  useEffect(() => {
-    const found = extraPreloadNames(snapshot)
-    const merged = [...new Set([...extraNamesRef.current, ...found])].sort()
-    const key = merged.join(',')
-    if (key !== extraNamesRef.current.join(',')) {
-      extraNamesRef.current = merged
-      setExtraKey(key)
-    }
-  }, [snapshot])
-
-  // ─── WebGL 初期化（マウント時 + 未知ブロック名が増えたとき） ─────────────
+  // ─── WebGL 初期化（マウント時 + 資源を作る名前が増えた時 + 資源の基点が変わった時） ─────
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -686,23 +767,21 @@ export function IsometricView({
         setStatus('loading')
         setLoadingMsg('Loading textures...')
 
-        // 取得先に届かなくても例外にせず、単色で描くリソースを返す (#395)
+        // 取得先に届かなくても例外にせず、単色で描くリソースを返す (redstone-sim#395)
         const { resources, assets: builtAssets } = await buildResources(
-          [...VIEWER_PRELOAD_BLOCKS, ...extraNamesRef.current], resourcePackUrl)
+          [...resourceNamesRef.current], resourcePackUrl)
         if (cancelled) return
 
-        // 初回スナップショットで Structure を構築
-        const { structure } = worldSnapshotToStructure(snapshot)
-        structureRef.current = structure
-        prevSnapshotRef.current = snapshot
-
-        // **見えない mesh を作らせない** (#272)。deepslate の StructureRenderer は
+        // **準備ができた時の盤面から構造を作る** (#11)。読み込み中に来た盤面の差し替えと変化も、
+        // 描く盤面へ当ててあるので全部入る。移す元は effect が走った時の盤面で作っていたので、
+        // 読み込み中の変化を落とし、アプリが onReady で描き直していた (redstone-sim#109)。
+        //
+        // **見えない mesh を作らせない** (redstone-sim#272)。deepslate の StructureRenderer は
         // options 未指定だと useInvisibleBlockBuffer が既定 true になり、
         // setStructure のたびに**盤面の空セル 1 個につき 12 本の線**を積んだ mesh を作り直す。
         // 描画するコードはこのリポジトリに 1 件も無いので、作った直後に捨てている。
-        // 盤面の**体積**に比例するので、16x147x17 で 606ms / 64³ で 11.5 秒かかっていた
-        // (実測。盤面上限は BOARD_MAX=256 なのでそこまで行くとメモリで死ぬ)
-        const renderer = new StructureRenderer(gl, structure, resources,
+        // 盤面の**体積**に比例するので、16x147x17 で 606ms / 64³ で 11.5 秒かかっていた (redstone-sim での実測)
+        const renderer = new StructureRenderer(gl, model.structure, resources,
           { useInvisibleBlockBuffer: false })
         rendererRef.current = renderer
 
@@ -714,24 +793,18 @@ export function IsometricView({
           gl.bindTexture(gl.TEXTURE_2D, null)
         }
 
-        const size = structure.getSize()
-        // **回路の大きさに合わせて寄る** (#238)。
+        // **回路の大きさに合わせて寄る** (redstone-sim#238)。
         // 旧: max(幅,高さ,奥行) * 1.5 は視野角も画面比も見ていないため、
-        // 147 段の回路が画面の高さの 3 割しか使わない糸のような柱になっていた
-        fittedSizeRef.current = `${size[0]},${size[1]},${size[2]}`
-        // 外から指定されていたらそちらを尊重する (上書きしない)
-        if (!externalCameraRef.current) {
-          cameraRef.current.distance = fitDistance(size as [number, number, number], {
-            aspect: canvas.clientWidth / Math.max(1, canvas.clientHeight),
-          })
-        }
+        // 147 段の回路が画面の高さの 3 割しか使わない糸のような柱になっていた。
+        // 資源の作り直しでは大きさが変わらないので、寄りはそのまま (名前が増えるたびに寄り直さない)
+        fitToSize()
 
         setAssets(builtAssets)
         setStatus('ready')
         let readyFired = false
 
         draw = () => {
-          if (!structureRef.current || !rendererRef.current) return
+          if (!rendererRef.current) return
           const cam = cameraRef.current
 
           // 外部からのカメラ上書き (fitCamera 等) を消費する
@@ -756,8 +829,8 @@ export function IsometricView({
             renderer.setViewport(0, 0, w, h)
           }
 
-          // ピック (#397) と同じ関数で作る。片方だけ変えると押した所と違うマスが切り替わる
-          const vm = viewMatrixOf(cam, structureRef.current.getSize())
+          // ピック (redstone-sim#397) と同じ関数で作る。片方だけ変えると押した所と違うマスが切り替わる
+          const vm = viewMatrixOf(cam, sizeOf())
 
           // カメラ状態を外部に公開（グリッドオーバーレイ等に使用）
           if (cameraStateRef) {
@@ -775,10 +848,10 @@ export function IsometricView({
             onReadyRef.current?.()
           }
 
-          // "always" は毎フレーム描き続ける。"demand" はここで止まり、requestDraw を待つ (#434)
+          // "always" は毎フレーム描き続ける。"demand" はここで止まり、requestDraw を待つ (redstone-sim#434)
           if (frameLoopRef.current === 'always') requestDraw()
         }
-        // 作り直し (extraKey・resourcePackUrl) のときは、前の文脈の予約が残っていない
+        // 作り直し (資源の名前・resourcePackUrl) のときは、前の文脈の予約が残っていない
         // (cleanup で取り消している) ので、ここで必ず最初の 1 フレームが予約される
         drawRef.current = draw
         requestDraw()
@@ -797,47 +870,9 @@ export function IsometricView({
       animFrameRef.current = 0
       if (drawRef.current === draw) drawRef.current = null
       rendererRef.current = null
-      structureRef.current = null
-      prevSnapshotRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [extraKey, resourcePackUrl]) // 初回マウント時 + 未知ブロック名が増えたとき (#234) + 資源の基点が変わったとき (#434)
-
-  // ─── snapshot 変化時に構造を再構築 ──────────────────────────────────────
-
-  useEffect(() => {
-    const renderer = rendererRef.current
-    if (!renderer) return
-    // **中身で比べる** (#272)。EditorPage の snapshot は毎レンダ新しい
-    // オブジェクトリテラルなので、参照比較のガードは一度も効かない。
-    // ブロックが 1 個も変わらないパレット選択でも構造を作り直していた (実測 0.5-0.7 秒)。
-    // sim も editor も BlockState を書き換えず必ず新しいオブジェクトを作るので、
-    // **エントリごとの参照比較で変更を取りこぼさない**
-    // (in-place で書き換える経路を生やすとここが効かなくなる)
-    if (sameSnapshot(prevSnapshotRef.current, snapshot)) {
-      prevSnapshotRef.current = snapshot
-      return
-    }
-
-    const { structure: newStructure } = worldSnapshotToStructure(snapshot)
-    // **大きさが変わったら寄り直す** (#238)。取り込みで盤面が伸びても
-    // マウント時の距離のままだと、収まらない / 豆粒になる
-    const ns = newStructure.getSize()
-    const key = `${ns[0]},${ns[1]},${ns[2]}`
-    if (key !== fittedSizeRef.current) {
-      fittedSizeRef.current = key
-      if (!externalCameraRef.current) {
-        const canvas = canvasRef.current
-        cameraRef.current.distance = fitDistance(ns as [number, number, number], {
-          aspect: canvas ? canvas.clientWidth / Math.max(1, canvas.clientHeight) : 1,
-        })
-      }
-    }
-    renderer.setStructure(newStructure)
-    structureRef.current = newStructure
-    prevSnapshotRef.current = snapshot
-    requestDraw()
-  }, [snapshot, requestDraw])
+  }, [resourceKey, resourcePackUrl]) // 初回マウント時 + 資源の名前が増えたとき (redstone-sim#234) + 資源の基点が変わったとき (redstone-sim#434)
 
   // ─── レンダリング ──────────────────────────────────────────────────────────
 
@@ -861,8 +896,8 @@ export function IsometricView({
           width: '100%',
           height: '100%',
           display: 'block',
-          // 3D: 押せる素子の上で pointer、回している間は grabbing (#397)
-          // interactive=false (#434): 操作を受けないので、カーソルは親に任せ、指のスクロールも通す
+          // 3D: 押せる素子の上で pointer、回している間は grabbing (redstone-sim#397)
+          // interactive=false (redstone-sim#434): 操作を受けないので、カーソルは親に任せ、指のスクロールも通す
           cursor: !interactive ? undefined
             : isPanning ? 'grabbing' : topDown ? (panMode ? 'grab' : editable ? 'crosshair' : 'grab')
             : (hoverTarget && onBlockClick ? 'pointer' : 'grab'),
@@ -885,7 +920,7 @@ export function IsometricView({
           {loadingMsg}
         </div>
       )}
-      {/* 取得先に届かず単色で描いているとき (#395)。onReady はいつもどおり呼ぶ */}
+      {/* 取得先に届かず単色で描いているとき (redstone-sim#395)。onReady はいつもどおり呼ぶ */}
       {status === 'ready' && assets !== 'full' && (
         <div data-testid="viewer-assets-note" style={{
           position: 'absolute', left: 8, bottom: 8, pointerEvents: 'none',

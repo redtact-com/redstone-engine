@@ -66,12 +66,26 @@ redstone-sim の docs/research/19 §9 の決まり。
 
 | 種類 | 扱い |
 |---|---|
-| Mojang のテクスチャ・モデル | **同梱しない**。実行時にミラー ([misode/mcmeta](https://github.com/misode/mcmeta)) から取る |
+| Mojang のテクスチャ・モデル | **同梱しない**。実行時に GitHub のリポから取る (下の取得先) |
 | 第三者のリソースパック | **明示の再配布許諾が無ければ同梱しない**。クレジットは許諾の代わりにならない |
 | 自前で描いたアート | 自由 |
 
 - redstone-sim が同梱している MK.2 Redstone のパックは、許諾がこの repo に及ぶか分からないので入れない
 - 新しく third-party のアセットを足すときは、許諾を取ってから。許諾の範囲は credit.md に書く
+
+取得先 (packages/view-3d の src/renderer/assetSources.ts。redstone-sim と同じ取り方。#11):
+
+| 物 | リポ (固定の版) |
+|---|---|
+| テクスチャ | [misode/mcmeta](https://github.com/misode/mcmeta) (タグ `1.21.4-assets`) |
+| blockstates と models の JSON (`blocks_states.json`・`blocks_models.json`)・block のテクスチャの予備 | [PrismarineJS/minecraft-assets](https://github.com/PrismarineJS/minecraft-assets) (コミット a95e329 の data/1.21.4) |
+
+- 試す順は raw.githubusercontent.com → [cdn.jsdelivr.net](https://www.jsdelivr.com/) (同じリポの同じ版を配る別の配信網)。
+  利用者のブラウザが取るだけで、この repo は中継も同梱もしない。どちらにも届かなければ、自前の色の単色の立方体で描く。
+- 版はコミットかタグで固定する (ブランチを指さない)。版を上げる時は両方を一緒に上げる。
+- リソースパックを読む仕組み (`resourcePackUrl`) は残すが、**既定はパック無し**。渡した時だけ、その基点の下を先に試す。
+- ゲームのデータから抜いた表 (variant の一覧など) も持ち込まない。全部のブロックが描けるかの検査が要る時は、
+  固定の版を実行時に取って突き合わせる形で作る。
 
 ---
 
@@ -92,4 +106,6 @@ redstone-sim の docs/research/19 §9 の決まり。
 - コメントとドキュメントの **Java の逐語引用** (.rs・.toml・.ts・.tsx・.mjs・.md)
 - 手元の絶対パス
 - ゲーム由来のファイル (jar・class・Java のソース・mappings・データの書き出し)
+- テクスチャ・モデル・リソースパックの置き場 (assets/minecraft/・resourcepack/・bundle.json・.mcmeta・blocks_states.json ほか)
+  と、ゲームのデータの抜き書き (variant の表)。自前の絵と PR の画像があるので、.png の全部は禁じない
 - 許可リストに無い crate (Cargo.lock)・エンジンの crate の外部の依存・決めたフォルダの外からの include_bytes / include_str

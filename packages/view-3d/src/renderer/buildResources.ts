@@ -37,7 +37,7 @@ async function overlayPackData(
   blockNames: string[],
   statesJson: Record<string, unknown>,
   modelsJson: Record<string, unknown>,
-  packUrl: string | undefined,
+  packUrl: string,
 ): Promise<void> {
   const names = [...new Set(blockNames.map(n => n.replace('minecraft:', '')))]
 
@@ -56,7 +56,7 @@ async function overlayPackData(
   const queue = [...allModelRefs]
 
   while (queue.length > 0) {
-    // **同じ ref を 1 度しか取らない** (#276)。親 ref は下の push で重複して積まれるので、
+    // **同じ ref を 1 度しか取らない** (redstone-sim#276)。親 ref は下の push で重複して積まれるので、
     // ここで落とさないと同一 URL への並列 fetch が大量に走る
     // (実測: 358 本のうちユニークは 264 本、94 本が同じ波の中の重複だった)
     const batch = [...new Set(queue.splice(0, queue.length))].filter(ref => !loaded.has(ref))
@@ -84,7 +84,7 @@ async function overlayPackData(
 }
 
 /**
- * テクスチャがどこまで取れたか (#395)。
+ * テクスチャがどこまで取れたか (redstone-sim#395)。
  * - `full`: 全部取れた (どこにも無いものは今までどおり市松)
  * - `partial`: 届かないテクスチャがあり、その面を単色で描いている
  * - `solid`: blockstates / models の JSON が届かず、全ブロックを単色の立方体で描いている
@@ -97,18 +97,19 @@ export interface BuiltResources {
 }
 
 /**
- * @param packUrl カスタムリソースパックの基点 URL (#434)。省くと既定 (`DEFAULT_RESOURCE_PACK_URL`)
+ * @param packUrl リソースパックの基点 URL (redstone-sim#434)。**省くとパック無し** (#11)。
+ *   パックの bundle・JSON・テクスチャを 1 つも取りに行かず、mcmeta と PrismarineJS だけから作る
  */
 export async function buildResources(blockNames: string[], packUrl?: string): Promise<BuiltResources> {
   const [statesJsonBase, modelsJsonBase] = await Promise.all([
     getBlockStates(),
     getBlockModels(),
-    // パック JSON を 1 本にまとめた bundle.json を**並行して**先読みする (#276)。
-    // 取れなければ個別取得にフォールバックするので、失敗しても壊れない
+    // パック JSON を 1 本にまとめた bundle.json を**並行して**先読みする (redstone-sim#276)。
+    // 取れなければ個別取得にフォールバックするので、失敗しても壊れない。パック無しなら何もしない
     preloadPackBundle(packUrl),
   ])
 
-  // JSON がどのミラーからも届かない → 全ブロックを単色の立方体で描く (#395)。
+  // JSON がどのミラーからも届かない → 全ブロックを単色の立方体で描く (redstone-sim#395)。
   // 以前はここで例外になり、盤面がエラー表示になっていた (2D の編集画面も同じ部品なので編集もできなかった)
   if (!statesJsonBase || !modelsJsonBase) {
     return { resources: await buildSolidResources(blockNames), assets: 'solid' }
@@ -118,10 +119,10 @@ export async function buildResources(blockNames: string[], packUrl?: string): Pr
   const statesJson: Record<string, unknown> = { ...statesJsonBase }
   const modelsJson: Record<string, unknown> = { ...modelsJsonBase }
 
-  // パックデータをオーバーレイ（パックにあるブロックのみ上書き）
-  await overlayPackData(blockNames, statesJson, modelsJson, packUrl)
+  // パックデータをオーバーレイ（パックにあるブロックのみ上書き）。パック無しなら飛ばす
+  if (packUrl !== undefined) await overlayPackData(blockNames, statesJson, modelsJson, packUrl)
 
-  // variant 必須プロパティの既定値 (#343)。sim が捨てたプロパティを描画時に補う
+  // variant 必須プロパティの既定値 (redstone-sim#343)。盤面の文字列に書いていないプロパティを描画時に補う
   const defaultProps = new Map<string, Record<string, string>>()
 
   // 構造体のブロックの BlockDefinition を構築
@@ -178,7 +179,7 @@ export async function buildResources(blockNames: string[], packUrl?: string): Pr
   // 構造体のブロックが実際に使うテクスチャのみ収集
   // statesJson・modelsJson にパックデータが含まれているため、
   // パックブロックのカスタムテクスチャパスも自動的に収集される
-  // 並べ替えておく。以前はログ出力の中の sort() がこの配列を並べ替えていた (#395 でログを消した)
+  // 並べ替えておく。以前はログ出力の中の sort() がこの配列を並べ替えていた (redstone-sim#395 でログを消した)
   const uniqueBlockNames = [...new Set(blockNames.map(n => n.replace('minecraft:', '')))].sort()
 
   const texturePaths = collectTexturePaths(
@@ -188,17 +189,17 @@ export async function buildResources(blockNames: string[], packUrl?: string): Pr
   )
   addSpecialRendererTextures(texturePaths, uniqueBlockNames)
 
-  // テクスチャを並列フェッチ（パック → mcmeta → PrismarineJS の順で試行）。
+  // テクスチャを並列フェッチ（パック (渡した時だけ) → mcmeta → PrismarineJS の順で試行）。
   // 取得・先頭フレームの切り出し・image/png への正規化と検証は fetchTexture が行い、
-  // 結果をページ内で覚える (#395)。作り直しのときは取り直さない
+  // 結果をページ内で覚える (redstone-sim#395)。作り直しのときは取り直さない
   const results = await Promise.all(
     [...texturePaths].map(async (path) => [path, await fetchTexture(path, packUrl)] as const),
   )
-  // アトラスのスロットは texturePaths の順に並ぶ (#395)。以前は取得が終わった順に並んで読み込むたびに変わり、
+  // アトラスのスロットは texturePaths の順に並ぶ (redstone-sim#395)。以前は取得が終わった順に並んで読み込むたびに変わり、
   // テクセルの境目の画素が揺れていた (同じビルドを読み込み直すだけで最大 60 画素違った)
   const validBlobs: Record<string, Blob> = {}
-  // 届かなかったテクスチャは、その面を単色で描く (#395)。
-  // どこにも無いもの (missing) は今までどおり市松にする。取りこぼし (#343) に気づけるように
+  // 届かなかったテクスチャは、その面を単色で描く (redstone-sim#395)。
+  // どこにも無いもの (missing) は今までどおり市松にする。取りこぼし (redstone-sim#343) に気づけるように
   const solids: Record<string, string> = {}
   for (const [path, r] of results) {
     if (r.kind === 'ok') validBlobs[`minecraft:${path}`] = r.blob
@@ -207,7 +208,7 @@ export async function buildResources(blockNames: string[], packUrl?: string): Pr
 
   // deepslate の upperPowerOfTwo バグ (sqrt(N+1) が整数でないとアトラスが小さくなる) は、
   // buildAtlas32 が幅を自前で計算するので影響を受けない (詳細は atlasUtils.ts の nextPow2)。
-  // 以前ここで呼んでいた水増しの padTextureBlobs は #276 で外し、#395 で関数ごと消した
+  // 以前ここで呼んでいた水増しの padTextureBlobs は redstone-sim#276 で外し、redstone-sim#395 で関数ごと消した
 
   // 32×32 スロットのカスタムアトラスを構築
   // deepslate の fromBlobs は drawImage のソース rect を固定 16×16 にするため
@@ -245,7 +246,7 @@ export async function buildResources(blockNames: string[], packUrl?: string): Pr
       return getBlockFlags(id.path)
     },
     getBlockProperties: () => null,
-    // **実装しないと variant 必須のブロックが消える** (#343)。下の defaultPropsOf 参照
+    // **実装しないと variant 必須のブロックが消える** (redstone-sim#343)。下の defaultPropsOf 参照
     getDefaultBlockProperties: (id: Identifier) =>
       defaultProps.get(id.path.replace(/^block\//, '')) ?? null,
   }
@@ -253,12 +254,13 @@ export async function buildResources(blockNames: string[], packUrl?: string): Pr
 }
 
 /**
- * blockstate の variant キーから既定プロパティを組み立てる (#343)。
+ * blockstate の variant キーから既定プロパティを組み立てる (redstone-sim#343)。
  *
- * sim は挙動に効かないプロパティを捨てるので、`oak_log` の `axis` や
- * `carved_pumpkin` の `facing` を持っていない。deepslate の variant 選択は
+ * 盤面の文字列がプロパティを省いていると (redstone-sim では sim が挙動に効かないプロパティを捨てていた)、
+ * `oak_log` の `axis` や `carved_pumpkin` の `facing` が無い。engine-js の `StateTable.name` は全部を書くので、
+ * 補うのはそれ以外の出どころの文字列だけになる。deepslate の variant 選択は
  * **全プロパティ完全一致**なので、そのままでは**どれにも一致せず何も描かれない**
- * (エラーにならないので気づけない。#234 で塀が消えたのと同じ症状)。
+ * (エラーにならないので気づけない。redstone-sim#234 で塀が消えたのと同じ症状)。
  *
  * `ChunkBuilder` は `getDefaultBlockProperties` で**足りないプロパティだけ**を補うので、
  * ここで「その名前が取りうる値」を返せば、名前ごとの手書き表を持たずに全ブロックが救われる。

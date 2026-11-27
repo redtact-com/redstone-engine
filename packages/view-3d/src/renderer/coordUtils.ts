@@ -3,14 +3,15 @@ const FOV_Y = 70 * (Math.PI / 180)
 export const FOV_F = 1 / Math.tan(FOV_Y / 2) // ≈ 1.4281
 
 /**
- * canvas ピクセル座標をワールドのブロック座標に変換する（top-down モード専用）。
+ * canvas ピクセル座標を、構造ローカルのブロック座標に変換する（top-down モード専用）。
+ * 世界の座標へは、呼ぶ側 (IsometricView) が盤面の範囲の最小を足して直す。
  * @param px - canvas 上の X ピクセル座標
  * @param py - canvas 上の Y ピクセル座標
  * @param canvasW - canvas の幅 (px)
  * @param canvasH - canvas の高さ (px)
  * @param size - Structure のサイズ [X, Y, Z]
  * @param camDist - カメラ距離
- * @param targetY - 配置対象の Y レイヤー
+ * @param targetY - 配置対象の Y レイヤー (構造ローカル)
  * @param panX - カメラパンオフセット X（ワールド座標）
  * @param panZ - カメラパンオフセット Z（ワールド座標）
  * @returns ブロック座標 [x, y, z]、範囲外なら null

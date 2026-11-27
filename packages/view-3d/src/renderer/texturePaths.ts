@@ -122,7 +122,7 @@ export function addSpecialRendererTextures(
     texturePaths.add('block/redstone_torch_off')
   }
 
-  // チェスト類: chestRenderer が entity/chest/{normal,trapped} を参照 (#343)。
+  // チェスト類: chestRenderer が entity/chest/{normal,trapped} を参照 (redstone-sim#343)。
   // モデル側は particle しか持たないので collectTexturePaths では拾えず、
   // **足さないと形は出るが黒×マゼンタの市松になる**
   const CHEST_TEXTURES: Record<string, string> = {
@@ -134,9 +134,9 @@ export function addSpecialRendererTextures(
     if (uniqueBlockNames.includes(block)) texturePaths.add(`entity/chest/${tex}`)
   }
 
-  // シュルカーボックス: shulkerBoxRenderer が entity/shulker/shulker_{color} を参照 (#343)。
+  // シュルカーボックス: shulkerBoxRenderer が entity/shulker/shulker_{color} を参照 (redstone-sim#343)。
   // deepslate の表は**色付き 16 種しか持たない**ため、無染色は viewer 側で
-  // purple へ読み替えている (world-to-structure.ts の CONTAINER_RENDER_ALIAS)
+  // purple へ読み替えている (board-to-structure.ts の DRAW_ALIAS)
   for (const name of uniqueBlockNames) {
     const m = /^([a-z_]+)_shulker_box$/.exec(name)
     if (m) texturePaths.add(`entity/shulker/shulker_${m[1]}`)

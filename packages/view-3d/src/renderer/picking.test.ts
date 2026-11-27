@@ -1,15 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { TRIGGERABLE_TYPES } from '@redstone/sim'
-import type { BlockState, BlockType } from '@redstone/sim'
-import { fitDistance } from '../camera.js'
+import { fitDistance } from '../camera'
 import {
-  viewMatrixOf, projMatrixOf, canvasRay, pointToCanvas, pickCell, pickRoleOf, pickNearest,
+  viewMatrixOf, projMatrixOf, canvasRay, pointToCanvas, pickCell, pickRoleFrom, pickNearest,
   PICK_PASS_THROUGH, TOUCH_PICK_RADII,
-} from './picking.js'
-import type { CameraPose, Cell3, Ray, Size3 } from './picking.js'
+} from './picking'
+import type { CameraPose, Cell3, Ray, Size3 } from './picking'
 
 /**
- * 3D 盤面のピッキング (#397) の計算を確かめる。
+ * 3D 盤面のピッキング (redstone-sim#397) の計算を確かめる。
  *
  * 描画 (WebGL) は vitest で動かせないので、**描画と同じ行列**で
  * 「マスの中心を画面に出す → その点から光線を出す → 同じマスに戻る」往復を見る。
@@ -43,11 +41,21 @@ function rayThroughCell(cam: CameraPose, size: Size3, cell: readonly number[]): 
 }
 
 const key = (c: readonly number[]) => `${c[0]},${c[1]},${c[2]}`
-const block = (type: BlockType) => ({ type }) as BlockState
 
-function roleFrom(blocks: Map<string, BlockState>) {
-  return (x: number, y: number, z: number) => pickRoleOf(blocks.get(`${x},${y},${z}`))
+/** テストの「押せる物」: アプリが状態表の性質で決める所の代わり。名前で決める */
+const TARGETS = new Set(['lever', 'stone_button', 'oak_door'])
+const pickRole = pickRoleFrom(state => TARGETS.has(state.split('[')[0]))
+
+/** 盤面 (鍵 → blockstate の文字列) のマスの扱い。空のマスは null (IsometricView と同じく pickRole を呼ばない) */
+function roleFrom(blocks: Map<string, string>) {
+  return (x: number, y: number, z: number) => {
+    const s = blocks.get(`${x},${y},${z}`)
+    return s === undefined ? null : pickRole(s)
+  }
 }
+
+const LEVER = 'lever[face=floor,facing=north,powered=false]'
+const WIRE = 'redstone_wire[east=side,north=none,power=0,south=none,west=side]'
 
 const CAMERAS: [string, (s: Size3) => CameraPose][] = [
   ['既定 45/45', s => poseOf(45, 45, s)],
@@ -170,38 +178,40 @@ describe('手前のマスの扱い (素通り・遮る)', () => {
       expect(before.length).toBeGreaterThan(0)
       const front = before[before.length - 1]
 
-      const blocks = new Map<string, BlockState>([[key(lever), block('lever')]])
+      const blocks = new Map<string, string>([[key(lever), LEVER]])
       const roleAt = roleFrom(blocks)
-      for (const t of ['wire', 'torch', 'repeater', 'rail', 'glass', 'pane', 'water'] as BlockType[]) {
-        blocks.set(key(front), block(t))
+      for (const t of [WIRE, 'redstone_torch[lit=true]', 'repeater[delay=1,facing=north,locked=false,powered=false]',
+        'rail[shape=north_south,waterlogged=false]', 'glass', 'lime_stained_glass_pane[east=false,north=true,south=true,waterlogged=false,west=false]',
+        'water[level=0]']) {
+        blocks.set(key(front), t)
         expect(pickCell(ray, size, roleAt), `${t} は素通り`).toEqual(lever)
       }
-      for (const t of ['solid', 'slab', 'lamp', 'piston', 'decor'] as BlockType[]) {
-        blocks.set(key(front), block(t))
+      for (const t of ['stone', 'smooth_stone_slab[type=bottom,waterlogged=false]', 'redstone_lamp[lit=false]', 'piston[extended=false,facing=up]', 'glowstone']) {
+        blocks.set(key(front), t)
         expect(pickCell(ray, size, roleAt), `${t} は遮る`).toBeNull()
       }
       // 手前が押せる素子なら、そちらが当たる (奥のレバーではない)
-      blocks.set(key(front), block('button_stone'))
+      blocks.set(key(front), 'stone_button[face=floor,facing=north,powered=false]')
       expect(pickCell(ray, size, roleAt)).toEqual(front)
     })
   }
 
   it('軸に沿った光線: 手前のワイヤーは素通り、石の奥のレバーは null', () => {
     const ray: Ray = { origin: [5.5, 1.5, -3], dir: [0, 0, 1] }
-    const blocks = new Map<string, BlockState>([
-      ['5,1,5', block('lever')],
-      ['5,1,3', block('wire')],
+    const blocks = new Map<string, string>([
+      ['5,1,5', LEVER],
+      ['5,1,3', WIRE],
     ])
     expect(pickCell(ray, size, roleFrom(blocks))).toEqual([5, 1, 5])
-    blocks.set('5,1,3', block('solid'))
+    blocks.set('5,1,3', 'stone')
     expect(pickCell(ray, size, roleFrom(blocks))).toBeNull()
   })
 
   it('奥の素子より手前の素子が先に当たる', () => {
     const ray: Ray = { origin: [5.5, 1.5, -3], dir: [0, 0, 1] }
-    const blocks = new Map<string, BlockState>([
-      ['5,1,9', block('lever')],
-      ['5,1,4', block('door_wood')],
+    const blocks = new Map<string, string>([
+      ['5,1,9', LEVER],
+      ['5,1,4', 'oak_door[facing=north,half=lower,hinge=left,open=false,powered=false]'],
     ])
     expect(pickCell(ray, size, roleFrom(blocks))).toEqual([5, 1, 4])
   })
@@ -238,12 +248,12 @@ describe('軸に平行な光線でも 0 で割らない', () => {
 
   it('真下向き: 上から順に見て最初の素子を返す', () => {
     const ray: Ray = { origin: [3.5, 40, 7.5], dir: [0, -1, 0] }
-    const blocks = new Map<string, BlockState>([
-      ['3,2,7', block('lever')],
-      ['3,0,7', block('solid')],
+    const blocks = new Map<string, string>([
+      ['3,2,7', LEVER],
+      ['3,0,7', 'stone'],
     ])
     expect(pickCell(ray, size, roleFrom(blocks))).toEqual([3, 2, 7])
-    blocks.set('3,5,7', block('solid'))
+    blocks.set('3,5,7', 'stone')
     expect(pickCell(ray, size, roleFrom(blocks))).toBeNull()
   })
 
@@ -253,30 +263,35 @@ describe('軸に平行な光線でも 0 で割らない', () => {
     const ray = rayAt(cam, size, W / 2, H / 2)
     expect(ray.origin.every(Number.isFinite)).toBe(true)
     expect(ray.dir.every(Number.isFinite)).toBe(true)
-    const blocks = new Map<string, BlockState>([['8,0,8', block('lever')]])
+    const blocks = new Map<string, string>([['8,0,8', LEVER]])
     expect(pickCell(ray, size, roleFrom(blocks))).toEqual([8, 0, 8])
   })
 })
 
-describe('pickRoleOf: マスの扱いの分け方', () => {
-  it('トリガ欄で押せる 14 種は当たり', () => {
-    expect(TRIGGERABLE_TYPES).toHaveLength(14)
-    for (const t of TRIGGERABLE_TYPES) expect(pickRoleOf(block(t)), t).toBe('target')
+describe('pickRoleFrom: マスの扱いの分け方', () => {
+  it('アプリが押せると言った物は当たり。素通りの一覧より先に見る', () => {
+    expect(pickRole(LEVER)).toBe('target')
+    expect(pickRole('stone_button[face=wall,facing=east,powered=true]')).toBe('target')
+    // 一覧にある名前でも、アプリが押せると言えば当たり
+    const wireTarget = pickRoleFrom(s => s.startsWith('redstone_wire'))
+    expect(wireTarget(WIRE)).toBe('target')
   })
 
-  it('素通りの型は押せる素子と重ならない', () => {
-    for (const t of PICK_PASS_THROUGH) {
-      expect(TRIGGERABLE_TYPES.includes(t), t).toBe(false)
-      expect(pickRoleOf(block(t)), t).toBe('pass')
+  it('素通りの一覧は名前で引く (プロパティは見ない)。色付きのガラスとガラス板・鉄格子・氷も素通り', () => {
+    const none = pickRoleFrom(() => false)
+    for (const name of PICK_PASS_THROUGH) expect(none(name), name).toBe('pass')
+    for (const s of [WIRE, 'redstone_wall_torch[facing=east,lit=false]', 'comparator[facing=north,mode=compare,powered=false]',
+      'black_stained_glass', 'white_stained_glass_pane[east=true,north=false,south=false,waterlogged=false,west=true]',
+      'iron_bars[east=false,north=false,south=false,waterlogged=false,west=false]', 'ice', 'bubble_column[drag=true]']) {
+      expect(none(s), s).toBe('pass')
     }
   })
 
-  it('一覧に無い型は遮る (安全側)。空気と空のマスは null', () => {
-    for (const t of ['solid', 'slab', 'decor', 'lamp', 'piston', 'piston_head', 'door_iron', 'trapdoor_iron', 'wall'] as BlockType[]) {
-      expect(pickRoleOf(block(t)), t).toBe('block')
+  it('一覧に無い名前は遮る (安全側)。押せるかの意味は持たない (アプリが言わなければレバーも遮る)', () => {
+    const none = pickRoleFrom(() => false)
+    for (const s of ['stone', 'redstone_lamp[lit=true]', LEVER, 'glowstone', 'sea_lantern', 'unknown_block']) {
+      expect(none(s), s).toBe('block')
     }
-    expect(pickRoleOf(block('air'))).toBeNull()
-    expect(pickRoleOf(undefined)).toBeNull()
   })
 })
 

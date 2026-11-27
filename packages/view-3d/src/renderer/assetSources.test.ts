@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 /**
- * 取得先のミラー (#395)。fetch を差し替え、モジュールの状態 (覚えたミラー) は毎回作り直す。
+ * 取得先のミラー (redstone-sim#395)。fetch を差し替え、モジュールの状態 (覚えたミラー) は毎回作り直す。
  *
  * raw.githubusercontent.com が落ちると盤面が出なかった。同じリポの同じ版を jsDelivr から取れること、
  * 応答が来なければ 8 秒で打ち切ること、一度落ちたら次から jsDelivr を先に試すことを見る。
@@ -48,7 +48,7 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-describe('取得先の固定 (#395)', () => {
+describe('取得先の固定 (redstone-sim#395)', () => {
   it('PrismarineJS はコミット、mcmeta はタグで固定し、ミラーごとに URL を組み立てる', () => {
     expect(src.PRISMARINE.ref).toBe(PIN)
     expect(src.MCMETA.ref).toBe('1.21.4-assets')
@@ -58,7 +58,7 @@ describe('取得先の固定 (#395)', () => {
   })
 })
 
-describe('ミラーを順に試す (#395)', () => {
+describe('ミラーを順に試す (redstone-sim#395)', () => {
   it('普段は raw だけを取る', async () => {
     const calls = stubFetch(() => json({ stone: 1 }))
     const r = await src.fetchFromMirrors(src.PRISMARINE, FILE, readJson)
@@ -117,7 +117,7 @@ describe('ミラーを順に試す (#395)', () => {
   })
 })
 
-describe('応答が来ないときの打ち切り (#395)', () => {
+describe('応答が来ないときの打ち切り (redstone-sim#395)', () => {
   /** 本物の fetch と同じく、signal が abort されたら AbortError で reject する */
   const hang: Handler = (_url, init) => new Promise<Response>((_resolve, reject) => {
     init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))

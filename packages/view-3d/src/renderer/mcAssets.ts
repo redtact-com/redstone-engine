@@ -1,24 +1,23 @@
 import { MC_VERSION, MCMETA, PRISMARINE, fetchFromMirrors } from './assetSources'
 
 /**
- * mcmeta のテクスチャの置き場 (raw)。**パレットのアイコンが img で直接読む** (#276)。
+ * mcmeta のテクスチャの置き場 (raw)。**パレットのアイコンが img で直接読む** (redstone-sim#276)。
  *
- * ビューア自身はここを使わず、`assetSources.ts` のミラーを順に試す (#395)。
+ * ビューア自身はここを使わず、`assetSources.ts` のミラーを順に試す (redstone-sim#395)。
  * パレットのアイコンはミラーに載せていない (今も onError で代わりの絵に替わる) ので、値は変えない。
  */
 export const MCMETA_BASE =
   `https://raw.githubusercontent.com/${MCMETA.repo}/${MCMETA.ref}/assets/minecraft`
 
-/**
- * カスタムリソースパックの基点 URL の既定。エディタは `public/resourcepack/` をここで配る。
- *
- * 別の場所で使うときは `IsometricView` の `resourcePackUrl` で変える (#434)。
- * 基点の下に `bundle.json` と `assets/minecraft/...` がある前提は変わらない。
+/*
+ * リソースパックは**既定で無し**にした (#11)。`IsometricView` の `resourcePackUrl` を渡した時だけ、
+ * その基点の下の `bundle.json` と `assets/minecraft/...` を試す。渡さなければ、パックへは 1 つも取りに行かない。
+ * 移す元 (redstone-sim) は `/resourcepack` を既定にして MK.2 のパックを配っていたが、この repo は同梱しない
+ * (docs/ip-policy.md §2)。
  */
-export const DEFAULT_RESOURCE_PACK_URL = '/resourcepack'
 
 /**
- * パック JSON キャッシュ。**解決値ではなく Promise を持つ** (#276)。
+ * パック JSON キャッシュ。**解決値ではなく Promise を持つ** (redstone-sim#276)。
  *
  * 値を await の後に入れていたので、**同一 URL への並列呼び出しが全部 fetch に行っていた**。
  * Cloudflare が `cache-control: max-age=0, must-revalidate` を返すため、
@@ -32,13 +31,13 @@ type PackJsonCache = Map<string, Promise<unknown | null>>
 interface PackBundle {
   models: Record<string, unknown>
   blockstates: Record<string, unknown>
-  /** パック内のテクスチャのパス (拡張子なし)。**古い bundle には無い** (#395) */
+  /** パック内のテクスチャのパス (拡張子なし)。**古い bundle には無い** (redstone-sim#395) */
   textures?: string[]
 }
 
 /**
- * 基点 URL ごとの状態 (#434)。基点が違えば中身も違いうるので、覚えた物を混ぜない。
- * 既定の基点しか使わなければ 1 個だけで、今までのモジュール変数と同じ動きになる。
+ * 基点 URL ごとの状態 (redstone-sim#434)。基点が違えば中身も違いうるので、覚えた物を混ぜない。
+ * パック無しのテクスチャは、別の覚え場所 (`vanillaTextures`) に持つ。
  */
 interface PackState {
   /** 末尾の `/` を除いた基点 */
@@ -54,7 +53,10 @@ interface PackState {
 
 const packs = new Map<string, PackState>()
 
-function packOf(packUrl: string = DEFAULT_RESOURCE_PACK_URL): PackState {
+/** パック無しで取ったテクスチャ (mcmeta と PrismarineJS だけ) */
+const vanillaTextures = new Map<string, Promise<TextureResult>>()
+
+function packOf(packUrl: string): PackState {
   const url = packUrl.replace(/\/+$/, '')
   let pack = packs.get(url)
   if (!pack) {
@@ -65,15 +67,16 @@ function packOf(packUrl: string = DEFAULT_RESOURCE_PACK_URL): PackState {
 }
 
 /**
- * パック JSON を 1 本にまとめた `bundle.json` を先読みする (#276)。
+ * パック JSON を 1 本にまとめた `bundle.json` を先読みする (redstone-sim#276)。
  *
  * br 19.3KB / 1 リクエストで、個別 358 本 (3 波 470-650ms) を置き換えられる。
  * **取れなければ黙って諦める** — 呼び出し側は今までどおり個別取得にフォールバックする。
  *
- * **Promise を覚える** (#395)。以前は 2 つ目の呼び出しが読み込みを待たずに抜けていたので、
+ * **Promise を覚える** (redstone-sim#395)。以前は 2 つ目の呼び出しが読み込みを待たずに抜けていたので、
  * 同時に作ると bundle を待たずに個別取得へ進むことがあった。
  */
 export function preloadPackBundle(packUrl?: string): Promise<void> {
+  if (packUrl === undefined) return Promise.resolve()
   const pack = packOf(packUrl)
   if (!pack.bundlePromise) {
     pack.bundlePromise = (async () => {
@@ -109,7 +112,7 @@ function fromBundle(packBundle: PackBundle | null, subpath: string): unknown | u
 // ── PrismarineJS の一括 JSON (2 リクエストで全量) ─────────────────────
 
 /**
- * 取得中または取得済みの Promise。**await の前に入れる** (#395)。
+ * 取得中または取得済みの Promise。**await の前に入れる** (redstone-sim#395)。
  * 以前は await のあとで値を入れていたので、同時に作ると JSON を 2 回取っていた。
  * 取れなかったら消して、次に作り直すときに取り直す。
  */
@@ -157,19 +160,20 @@ export function getBlockModels(): Promise<Record<string, unknown> | null> {
 /**
  * リソースパックから JSON ファイルを取得する。
  * subpath: "blockstates/lever.json" / "models/block/lever/off.json" など
- * 存在しない場合は null を返す。
+ * 存在しない場合と、パックを渡さない (既定) 場合は null を返す。
  */
 export function fetchPackJson(subpath: string, packUrl?: string): Promise<unknown | null> {
+  if (packUrl === undefined) return Promise.resolve(null)
   const pack = packOf(packUrl)
   const hit = pack.jsonCache.get(subpath)
   if (hit) return hit
   // **await の前に Promise を入れる**。ここが後だと同一 URL の並列呼び出しが素通りする
   const p = (async (): Promise<unknown | null> => {
     await preloadPackBundle(pack.url)
-    // bundle にあるものはネットワークへ行かない (#276)
+    // bundle にあるものはネットワークへ行かない (redstone-sim#276)
     const bundled = fromBundle(pack.bundle, subpath)
     if (bundled !== undefined) return bundled
-    // **bundle が読めたら、そこに無いものはパックに無い** (#395)。取りに行っても
+    // **bundle が読めたら、そこに無いものはパックに無い** (redstone-sim#395)。取りに行っても
     // Cloudflare Pages が 200 + index.html を返すだけだった (本番の初回ロードで 36 本)
     if (pack.bundle && (BUNDLE_MODEL.test(subpath) || BUNDLE_STATE.test(subpath))) return null
     try {
@@ -196,28 +200,30 @@ export type TextureFetchResult =
  * テクスチャの結果。
  * - `ok`: 先頭フレームを切り出し、image/png にそろえて検証済み
  * - `missing`: どこにも無い (全部 404・壊れた画像)。今までどおり市松で描く
- *   (#343 のような取りこぼしに気づけるようにするため)
+ *   (redstone-sim#343 のような取りこぼしに気づけるようにするため)
  * - `unreachable`: 届かない。その面を単色で描く
  */
 export type TextureResult = TextureFetchResult
 
 /**
- * テクスチャのキャッシュ (#395)。**パスごとに Promise を持つ** (await の前に入れる)。
+ * テクスチャのキャッシュ (redstone-sim#395)。**パスごとに Promise を持つ** (await の前に入れる)。
  *
  * 盤面を作り直すたびに全テクスチャを取り直していた (START のたびに 347 本・約 2.2 秒。
  * デモと埋め込みは回路を読み込むときに作り直すので、同じものを 2 回取っていた)。
  * 成功と「無い」は覚える (固定した版なので変わらない)。**「届かない」は覚えない**。
  */
-// (キャッシュの実体は基点ごとの PackState.textureCache。パックが先に試されるので、基点が違えば結果も違いうる)
+// (キャッシュの実体は基点ごとの PackState.textureCache と、パック無しの vanillaTextures。パックが先に試されるので、基点が違えば結果も違いうる)
 
 /**
  * テクスチャを取って、描ける Blob にそろえる。
- * 1. ローカルリソースパック (bundle の一覧にあるときだけ。一覧が無ければ今までどおり試す)
+ * 1. リソースパック (`packUrl` を渡した時だけ。bundle の一覧にあるときだけ。一覧が無ければ今までどおり試す)
  * 2. misode/mcmeta (raw → jsDelivr)
  * 3. block/ テクスチャは PrismarineJS (raw → jsDelivr)
  */
 export function fetchTexture(path: string, packUrl?: string): Promise<TextureResult> {
-  const { textureCache, url } = packOf(packUrl)
+  const pack = packUrl === undefined ? null : packOf(packUrl)
+  const textureCache = pack?.textureCache ?? vanillaTextures
+  const url = pack?.url
   const hit = textureCache.get(path)
   if (hit) return hit
   const p: Promise<TextureResult> = loadTexture(path, url)
@@ -231,7 +237,7 @@ export function fetchTexture(path: string, packUrl?: string): Promise<TextureRes
 }
 
 /** 「取得 → 先頭フレームの切り出し → image/png にそろえて検証」を 1 本にまとめる */
-async function loadTexture(path: string, packUrl: string): Promise<TextureResult> {
+async function loadTexture(path: string, packUrl: string | undefined): Promise<TextureResult> {
   const fetched = await fetchTextureBlob(path, packUrl)
   if (fetched.kind !== 'ok') return fetched
   const blob = await prepareTexture(fetched.blob, path)
@@ -250,14 +256,14 @@ function mayBeInPack(pack: PackState, path: string): boolean {
  * パックの取得が通信で失敗していたら、バニラに無くても `missing` とは言い切れないので `unreachable`。
  */
 export async function fetchTextureBlob(path: string, packUrl?: string): Promise<TextureFetchResult> {
-  const pack = packOf(packUrl)
-  await preloadPackBundle(pack.url)
+  const pack = packUrl === undefined ? null : packOf(packUrl)
+  if (pack) await preloadPackBundle(pack.url)
   let packFailed = false
 
-  // 1. ローカルリソースパック優先 (bundle の一覧にあるものだけ。#395)
+  // 1. リソースパック優先 (渡した時だけ。bundle の一覧にあるものだけ。redstone-sim#395)
   // Vite dev server / Cloudflare Pages は存在しないパスに index.html (text/html, 200) を返すため
   // Content-Type が image/* のレスポンスのみ受け付ける
-  if (mayBeInPack(pack, path)) {
+  if (pack && mayBeInPack(pack, path)) {
     try {
       const res = await fetch(`${pack.url}/assets/minecraft/textures/${path}.png`)
       const ct = res.headers.get('content-type') ?? ''

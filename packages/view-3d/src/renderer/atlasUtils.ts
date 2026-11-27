@@ -20,7 +20,7 @@ export function nextPow2(n: number): number {
  * UV 座標は deepslate 標準（スロット列/行インデックス ÷ 幅）と同一なので
  * StructureRenderer との互換性を保つ。
  *
- * `solids` は「色で塗るスロット」(#395)。テクスチャが届かなかった面や簡易表示の立方体に使う。
+ * `solids` は「色で塗るスロット」(redstone-sim#395)。テクスチャが届かなかった面や簡易表示の立方体に使う。
  * Blob を作らず fillRect で塗る。画像のスロットの後ろに並べるので、空なら今までと同じアトラスになる。
  * 同じ id が `textures` にあれば画像を優先する。
  */

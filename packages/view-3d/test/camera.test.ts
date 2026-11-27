@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { fitDistance, maxZoomOut, VIEWER_FOV_DEG, VIEWER_FAR } from '../src/camera.js'
+import { fitDistance, maxZoomOut, VIEWER_FOV_DEG, VIEWER_FAR } from '../src/camera'
 
 /**
- * カメラの寄りが回路の大きさに追従するか (#238)。
+ * カメラの寄りが回路の大きさに追従するか (redstone-sim#238)。
  *
  * 従来は `max(幅, 高さ, 奥行) * 1.5` で、147 段の回路が画面の高さの 3 割しか使わない
  * 糸のような柱になっていた (実測)。ここでは**画面に映る大きさ**で確かめる。
@@ -18,7 +18,7 @@ const fillRatio = (size: [number, number, number], aspect = 1): number => {
   return Math.hypot(...size) / visibleHeight(d)
 }
 
-describe('fitDistance — 回路が画面に収まる距離 (#238)', () => {
+describe('fitDistance — 回路が画面に収まる距離 (redstone-sim#238)', () => {
   it('147 段の細長い回路が画面の 7 割以上を使う (旧実装は 3 割)', () => {
     const size: [number, number, number] = [7, 147, 17]
     const r = fillRatio(size)
@@ -58,7 +58,7 @@ describe('fitDistance — 回路が画面に収まる距離 (#238)', () => {
   })
 })
 
-describe('maxZoomOut — 引ける上限 (#238)', () => {
+describe('maxZoomOut — 引ける上限 (redstone-sim#238)', () => {
   it('小さい回路では従来どおり 200 まで引ける', () => {
     expect(maxZoomOut([16, 16, 16])).toBe(200)
   })

@@ -1,5 +1,5 @@
 /**
- * バニラのアセット (blockstates / models の JSON とテクスチャ) の取得元とミラー (#395)。
+ * バニラのアセット (blockstates / models の JSON とテクスチャ) の取得元とミラー (redstone-sim#395)。
  *
  * docs/ip-policy.md §2 によりアセットは同梱しないので、実行時に GitHub のリポから取る。
  * 取得先が raw.githubusercontent.com の 1 つしか無く、ここが落ちると盤面が出なかった
@@ -21,11 +21,13 @@ export interface AssetRepo {
 /**
  * PrismarineJS/minecraft-assets。blocks_states.json / blocks_models.json と、block テクスチャの予備。
  *
- * **コミットで固定する** (#395)。以前は master を指していた。
- * a95e329 は data/1.21.4 を最後に変えたコミット (「1.21.4 (#33)」2025-02-09) で、
+ * **コミットで固定する** (redstone-sim#395)。以前は master を指していた。
+ * a95e329 は data/1.21.4 を最後に変えたコミット (「1.21.4 (PrismarineJS/minecraft-assets#33)」2025-02-09) で、
  * 固定した時点の master と JSON 2 本が同じバイト列 (sha256 f2e3cdf9… / d2ed5140…)。
- * render-coverage が使う test/blockstate-variants.1.21.4.json も同じ元から作っている。
- * **MC_VERSION を上げるときは、この版と test のデータも一緒に上げる**。
+ * **MC_VERSION を上げるときは、この版も一緒に上げる**。
+ * redstone-sim はここから抜いた variant の表 (test/blockstate-variants.1.21.4.json) で「全部のブロックが描けるか」を
+ * 見ていたが、ゲームのデータの抜き書きなのでこの repo には持ち込まない (#11)。ブロックが増える時に、
+ * 固定の版を実行時に取って突き合わせる検査として作る。
  */
 export const PRISMARINE: AssetRepo = {
   repo: 'PrismarineJS/minecraft-assets',
@@ -34,7 +36,7 @@ export const PRISMARINE: AssetRepo = {
 
 /**
  * misode/mcmeta。テクスチャ (Java 版のモデルが参照するパスと完全一致)。
- * **タグで固定する** (#276)。タグはコミットごとに自動で付くので動かない前提にしている。
+ * **タグで固定する** (redstone-sim#276)。タグはコミットごとに自動で付くので動かない前提にしている。
  * 上げるときはテクスチャをピクセル比較してから上げること。
  */
 export const MCMETA: AssetRepo = {
@@ -48,7 +50,7 @@ export interface Mirror {
 }
 
 /**
- * 試す順。**先頭が普段の取得先** (#395 の案 A: raw を主に、jsDelivr を予備に)。
+ * 試す順。**先頭が普段の取得先** (redstone-sim#395 の案 A: raw を主に、jsDelivr を予備に)。
  * 入れ替えるときはこの配列の順を変えるだけでよい。
  *
  * jsDelivr はコミットやタグを指す URL を 1 年キャッシュして永続保存し、GitHub が落ちても配る

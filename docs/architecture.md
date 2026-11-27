@@ -15,7 +15,7 @@
 | crates/rse-cli | native の道具 (fixture の実行器・状態表の書き出し)。serde はここだけ | rse-engine |
 | packages/engine-js | wasm の読み込み・世界のハンドル・変化の窓・状態表 (TS)。窓口の決まりは docs/wasm-abi.md | rse-wasm の出力 (wasm)・rse-cli の出力 (状態表の JSON) |
 | packages/board | 盤面の型と編集 (置く・消す・選ぶ)。エンジンに依らない | なし |
-| packages/view-3d | 3D の描画と、押した座標の判定 (redstone-sim の packages/viewer を移す) | board の型 |
+| packages/view-3d | 3D の描画と、押した座標の判定 (redstone-sim の packages/viewer を移した。#11)。窓口は blockstate の文字列の盤面 (`board`) と変化の列 (`applyChanges`) で、押せるかはアプリが `pickRole` で渡す。窓口の型は board ができるまで src/types.ts に置き、6 本目で board へ移す | board の型 (今は無し)・deepslate。engine-js には依らない |
 | apps/web | アプリ。機能のパッケージを組み立てるだけ | packages/* |
 | conformance/fixtures | 正解の fixture。出どころを SOURCES.md に書く | — |
 
@@ -36,6 +36,9 @@ rse-java → rse-core → rse-blocks-*  ┐
 - 矢印の逆向きの依存を作らない。
 - **族どうしは依存しない**。族の間のやり取り (ダストが何に繋がるか・何が信号を出すか・導体か) は、状態表の性質のビットで引く。
 - 画面の機能のパッケージどうしも依存しない。共有する型は board に置く。
+- view-3d は engine-js に依らない。アプリが engine-js の変化の窓を `StateTable.name` で文字列にして `applyChanges` へ渡し、
+  3D で押された座標を `RustWorld.use` へ渡す。view-3d の窓口 (props・命令の口・書き出す型) に deepslate の型を出さないので、
+  描画の中身を替えても窓口は変わらない。
 
 ## 3. 振る舞いの振り分け
 

@@ -1,20 +1,19 @@
 /**
- * 3D 盤面のピッキング (#397)。押した点から光線を出し、盤面の格子を手前から 1 マスずつ辿る。
+ * 3D 盤面のピッキング (redstone-sim#397)。押した点から光線を出し、盤面の格子を手前から 1 マスずつ辿る。
  *
  * **WebGL を使わない計算だけで組む** (vitest で確かめられるようにするため)。
  * 色で塗って readPixels で読む方式 (deepslate の drawColoredStructure) は採らない。
  * 色が blockPos/256 なので 8bit で読むと 128 付近の 2 つの座標が同じ色になり、
  * 当たりが描いた画素だけになるので数 px のレバーを指で押せない。
  *
- * 座標は**構造ローカル** (snapshot の bounds の min が原点、1 ブロック = 1)。
+ * 座標は**構造ローカル** (盤面の範囲の最小が原点、1 ブロック = 1)。世界の座標へは IsometricView が直す。
  * 画面の座標は canvas の左上を原点にした CSS px。canvas は devicePixelRatio を
  * 掛けていない (canvas.width = clientWidth) ので、CSS px のまま計算してよい。
  */
 
 import { mat4, vec4 } from 'gl-matrix'
-import { isTriggerableType } from '@redstone/sim'
-import type { BlockState, BlockType } from '@redstone/sim'
-import { VIEWER_FOV_DEG, VIEWER_NEAR, VIEWER_FAR } from '../camera.js'
+import { VIEWER_FOV_DEG, VIEWER_NEAR, VIEWER_FAR } from '../camera'
+import type { PickRole, PickRoleFn } from '../types'
 
 export type Size3 = readonly [number, number, number]
 export type Cell3 = [number, number, number]
@@ -89,34 +88,47 @@ export function pointToCanvas(
 }
 
 /**
- * マスの扱い。
+ * マスの扱い (`PickRole` は types.ts)。
  *  - target: 押せる素子。**1 マス全体を当たりにする** (絵が数 px のレバーも押せるように)
  *  - pass:   素通り。細い・透けるので奥の素子を隠さない。それ自体は押せない
  *  - block:  遮る。奥の素子は押せない (見えない物は押せない)
  *  - null:   空
  */
-export type PickRole = 'target' | 'pass' | 'block'
+export type { PickRole }
+
+/** 染料の 16 色 (色付きのガラスとガラス板の名前に使う) */
+const DYE_COLORS = [
+  'white', 'orange', 'magenta', 'light_blue', 'yellow', 'lime', 'pink', 'gray',
+  'light_gray', 'cyan', 'purple', 'blue', 'brown', 'green', 'red', 'black',
+]
 
 /**
- * 素通りさせる型。**一覧に無い型は「遮る」として扱う** (安全側)。
+ * 素通りさせるブロックの名前 (細い物・透ける物)。**一覧に無い名前は「遮る」として扱う** (安全側)。
  * ガラス・ガラス板・水も素通りにする (奥に見えている素子を押せるように。
  * マイクラ本体ではガラス越しには押せないが、盤面を見て操作する道具なのでこちらを採る)。
+ *
+ * 移す元は sim の型 (wire・torch・wall_torch・repeater・comparator・レール 3 種・glass・pane・water・bubble_column) で
+ * 決めていた。ここでは名前で持つ。sim の glass の型に入っていた glowstone と sea_lantern は、透けないので外した。
  */
-export const PICK_PASS_THROUGH: ReadonlySet<BlockType> = new Set<BlockType>([
-  'wire', 'torch', 'wall_torch', 'repeater', 'comparator',
+export const PICK_PASS_THROUGH: ReadonlySet<string> = new Set<string>([
+  'redstone_wire', 'redstone_torch', 'redstone_wall_torch', 'repeater', 'comparator',
   'rail', 'powered_rail', 'activator_rail',
-  'glass', 'pane', 'water', 'bubble_column',
+  'glass', 'tinted_glass', 'ice', ...DYE_COLORS.map(c => `${c}_stained_glass`),
+  'glass_pane', 'iron_bars', ...DYE_COLORS.map(c => `${c}_stained_glass_pane`),
+  'water', 'bubble_column',
 ])
 
 /**
- * ブロックのマスの扱い。押せるかどうかは `isTriggerableType` で決める。
- * これはトリガ欄の TRIGGER_META と一致することを app/src/blockDrift.test.ts が
- * 確かめているので、盤面とトリガ欄で押せる物がずれない。
+ * 押せる物だけをアプリが決め、残りを素通りの一覧で分ける `PickRoleFn` を作る。
+ * `isTarget` が true なら target (素通りの一覧より先に見る)、一覧の名前なら pass、ほかは block。
+ * 受ける文字列は正規化した blockstate の文字列 (`normalizeState` の形。engine-js の `StateTable.name` と同じ)。
  */
-export function pickRoleOf(block: BlockState | undefined): PickRole | null {
-  if (!block || block.type === 'air') return null
-  if (isTriggerableType(block.type)) return 'target'
-  return PICK_PASS_THROUGH.has(block.type) ? 'pass' : 'block'
+export function pickRoleFrom(isTarget: (state: string) => boolean): PickRoleFn {
+  return (state) => {
+    if (isTarget(state)) return 'target'
+    const open = state.indexOf('[')
+    return PICK_PASS_THROUGH.has(open < 0 ? state : state.slice(0, open)) ? 'pass' : 'block'
+  }
 }
 
 /**

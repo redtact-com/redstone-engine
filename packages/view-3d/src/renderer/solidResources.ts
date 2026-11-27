@@ -1,9 +1,9 @@
 /**
- * 簡易表示 (#395)。blockstates / models の JSON がどこからも取れないときに、
+ * 簡易表示 (redstone-sim#395)。blockstates / models の JSON がどこからも取れないときに、
  * 全ブロックを**単色の立方体**で描くためのリソースを作る。
  *
  * 単色の立方体は 3 つでできる。
- * - blockstate `{ variants: { "": { model: "redstone-sim:solid/<名前>" } } }`。
+ * - blockstate `{ variants: { "": { model: "redstone-engine:solid/<名前>" } } }`。
  *   variant `""` はどのプロパティにも当たる (deepslate の一致判定は `props[""] === undefined`)
  * - 6 面の立方体モデル (面ごとに cullface 付き。隣が不透明なら隠れる)
  * - アトラスに名前ごとに作る単色のスロット
@@ -24,12 +24,12 @@ import { addSpecialRendererTextures } from './texturePaths'
 import { buildAtlas32 } from './atlasUtils'
 
 /** 単色の立方体のモデルとテクスチャの名前空間。バニラの名前とぶつけない */
-export const SOLID_NAMESPACE = 'redstone-sim'
+export const SOLID_NAMESPACE = 'redstone-engine'
 
 /** 形を持たないので簡易表示でも描かないもの */
 const INVISIBLE = new Set(['air', 'cave_air', 'void_air', 'structure_void', 'barrier', 'light'])
 
-/** `redstone-sim:solid/<名前>`。モデルとテクスチャの両方の id に使う */
+/** `redstone-engine:solid/<名前>`。モデルとテクスチャの両方の id に使う */
 export function solidId(name: string): string {
   return `${SOLID_NAMESPACE}:solid/${name}`
 }

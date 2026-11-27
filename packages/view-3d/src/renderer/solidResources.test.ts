@@ -6,7 +6,7 @@ import {
 } from './solidResources'
 
 /**
- * 簡易表示の単色の立方体 (#395)。JSON がどこからも取れないときに全ブロックをこれで描く。
+ * 簡易表示の単色の立方体 (redstone-sim#395)。JSON がどこからも取れないときに全ブロックをこれで描く。
  * deepslate が本当に面を出すかを、描画と同じ getMesh で確かめる。
  */
 
@@ -27,7 +27,7 @@ function quads(name: string, props: Record<string, string>, cull = noCull): numb
   return def.getMesh(Identifier.create(name), props, atlas, models, cull).quads.length
 }
 
-describe('単色の立方体 (#395)', () => {
+describe('単色の立方体 (redstone-sim#395)', () => {
   it.each([
     ['lever', {}],
     ['lever', { face: 'wall', facing: 'east', powered: 'true' }],
@@ -41,13 +41,13 @@ describe('単色の立方体 (#395)', () => {
     expect(quads('stone', {}, { ...noCull, down: true })).toBe(5)
   })
 
-  it('モデルとテクスチャは redstone-sim の名前空間に置き、バニラの名前とぶつけない', () => {
-    expect(solidId('stone')).toBe('redstone-sim:solid/stone')
-    expect(solidModelJson('stone').textures.all).toBe('redstone-sim:solid/stone')
+  it('モデルとテクスチャは redstone-engine の名前空間に置き、バニラの名前とぶつけない', () => {
+    expect(solidId('stone')).toBe('redstone-engine:solid/stone')
+    expect(solidModelJson('stone').textures.all).toBe('redstone-engine:solid/stone')
   })
 })
 
-describe('単色の色 (#395)', () => {
+describe('単色の色 (redstone-sim#395)', () => {
   it('色は名前で決まる (同じ名前なら同じ色、違う名前ならたいてい違う色)', () => {
     expect(solidColor('target')).toBe(solidColor('target'))
     expect(solidColor('target')).toBe(solidColor('minecraft:target'))
