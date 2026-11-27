@@ -9,10 +9,10 @@
  * 移す元は redstone-sim の packages/viewer/src/IsometricView.tsx (develop a40ae23)。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type * as React from 'react'
 import { StructureRenderer } from 'deepslate/render'
-import { BoardModel, type ModelUpdate } from './board-to-structure'
+import { BoardView, type ViewHooks } from './board-to-structure'
 import type { ApplyResult, Board, CellChange, PickRoleFn, Pos3 } from './types'
 import { buildResources, type AssetState } from './renderer/buildResources'
 import { fitDistance, maxZoomOut } from './camera'
@@ -79,9 +79,14 @@ export interface IsometricViewProps {
   /**
    * 描く盤面。変わったら、いま描いている盤面と文字列で比べ、範囲が同じなら違うマスだけを直す
    * (範囲が違えば丸ごと作り直し、寄りも合わせ直す)。`applyChanges` で当てた分も、この盤面に合わせて比べ直す。
-   * 同じ物 (参照) を渡し直しても何もしない
+   * 同じ物 (参照) を渡し直しても何もしない。変わったマスと範囲の外の数は `onBoardApplied` で知らせる
    */
   board: Board
+  /**
+   * `board` を当てた結果 (変わったマスの数と、描かなかった範囲の外の数)。最初の盤面で 1 回、
+   * それから `board` が変わるたびに呼ぶ。`applyChanges` の結果は、その戻り値で返す
+   */
+  onBoardApplied?: (result: ApplyResult) => void
   /**
    * 先に資源を作るブロックの名前 (アプリが状態表のブロックの名前を渡す)。盤面と変化に出た名前は自分で集め、
    * 知らない名前が出たら資源を作り直す (redstone-sim#234 の安全網)。`minecraft:` とプロパティは有ってもよい
@@ -157,10 +162,32 @@ export interface IsometricViewProps {
  */
 const CONTEXT_RELEASE_DELAY_MS = 0
 
+/** WebGL の文脈を手放すのに要る、canvas の口 */
+export interface ReleasableCanvas {
+  readonly isConnected: boolean
+  getContext(contextId: 'webgl'): WebGLRenderingContext | null
+}
+
+/**
+ * canvas が DOM から外れていれば、WebGL の文脈を手放す (手放したら true)。
+ *
+ * effect の片付けは unmount の時だけ走るとは限らない。React 19.2 の `<Activity mode="hidden">` は canvas を
+ * DOM に残したまま片付けを走らせるので、そこで手放すと、戻した時に失った文脈で作り直してしまう。
+ * 外れていない間は手放さない (StrictMode の付け直しも同じ canvas なので手放さない)。
+ * 取れなかった (WebGL 非対応) なら何もしない。別の種類の文脈を作ってしまわないよう 'webgl' だけ見る
+ * @internal 試験から呼ぶために書き出す (index.ts からは出さない)
+ */
+export function releaseIfDetached(canvas: ReleasableCanvas): boolean {
+  if (canvas.isConnected) return false
+  canvas.getContext('webgl')?.getExtension('WEBGL_lose_context')?.loseContext()
+  return true
+}
+
 // ─── コンポーネント ────────────────────────────────────────────────────────────
 
 export function IsometricView({
   board,
+  onBoardApplied,
   preloadNames,
   pickRole,
   topDown = false,
@@ -181,13 +208,22 @@ export function IsometricView({
   onReadyRef.current = onReady
   const pickRoleRef = useRef<PickRoleFn>(pickRole ?? NO_TARGETS)
   pickRoleRef.current = pickRole ?? NO_TARGETS
-  const rendererRef = useRef<StructureRenderer | null>(null)
 
-  // ─── 描く盤面 (#11) ────────────────────────────────────────────────────────
-  // React と WebGL の外のクラスに持つ。盤面の差し替え・applyChanges・読み込み中の変化を全部ここへ当てる
-  const [model] = useState(() => new BoardModel(board))
-  /** 最後に model へ当てた board。同じ物を渡し直されたら比べない */
+  // ─── 描く盤面と絵 (#11) ────────────────────────────────────────────────────
+  // 描く盤面 (BoardModel) と絵への振り分け (BoardView) は React と WebGL の外のクラスに持つ。
+  // 盤面の差し替え・applyChanges・読み込み中の変化を全部ここへ当て、絵 (StructureRenderer) は資源ができた時に attach する
+  /** BoardView が頼む事 (資源の作り直し・寄り直し・描く予約)。下で毎回入れ直す */
+  const hooksRef = useRef<ViewHooks | null>(null)
+  const [view] = useState(() => new BoardView<StructureRenderer>(board, preloadNames ?? [], {
+    names: names => hooksRef.current?.names(names),
+    resized: size => hooksRef.current?.resized(size),
+    draw: () => hooksRef.current?.draw(),
+  }))
+  const model = view.model
+  /** 最後に当てた board。同じ物を渡し直されたら比べない */
   const appliedBoardRef = useRef(board)
+  const onBoardAppliedRef = useRef(onBoardApplied)
+  onBoardAppliedRef.current = onBoardApplied
 
   // ─── 描くタイミング (redstone-sim#434) ─────────────────────────────────────
   /** 予約済みの requestAnimationFrame の ID。0 = 予約なし (止まっている) */
@@ -221,7 +257,7 @@ export function IsometricView({
   const sizeOf = useCallback(() => model.structure.getSize() as [number, number, number], [model])
 
   /** 引ける上限。**回路の大きさに追従させる** — 固定 200 だと大きい回路で引ききれない (redstone-sim#238) */
-  const zoomLimit = (): number => (rendererRef.current ? maxZoomOut(sizeOf()) : 200)
+  const zoomLimit = (): number => (view.renderer ? maxZoomOut(sizeOf()) : 200)
 
   /** 2D の層の y を構造ローカルにする。省いた時は下から 2 段目 (移す元の既定の 1 と同じ) */
   const localPlacementY = useCallback(
@@ -287,7 +323,7 @@ export function IsometricView({
   // 越えると古い文脈から失われて警告が出るので、unmount で WEBGL_lose_context を呼んで返す。
   // 資源の作り直し (名前が増えた・resourcePackUrl) では同じ文脈を使い続けるので、ここは unmount の時だけ。
   // StrictMode は同じ canvas のまま「外す → 付ける」をするので、タイマーで 1 拍置き、
-  // 付け直されたら取り消す
+  // 付け直されたら取り消す。1 拍の後も canvas が DOM に残っていれば (Activity の hidden ほか) 手放さない (#11)
   const releaseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     if (releaseTimerRef.current !== null) {
@@ -299,67 +335,46 @@ export function IsometricView({
       if (!canvas) return
       releaseTimerRef.current = setTimeout(() => {
         releaseTimerRef.current = null
-        // 取れなかった (WebGL 非対応) なら null。別の種類の文脈を作ってしまわないよう 'webgl' だけ見る
-        canvas.getContext('webgl')?.getExtension('WEBGL_lose_context')?.loseContext()
+        releaseIfDetached(canvas)
       }, CONTEXT_RELEASE_DELAY_MS)
     }
   }, [])
 
   // ─── 資源を作る名前 (redstone-sim#234 → #11) ──────────────────────────────
-  // preloadNames と、盤面と変化に出た名前を合わせる。名前は増えるだけで、知らない名前が出た時だけ
+  // preloadNames と、盤面と変化に出た名前を合わせる (BoardView が持つ)。名前は増えるだけで、知らない名前が出た時だけ
   // resourceKey を動かし、下の初期化を作り直す (渡さないと、そのブロックは**エラーも出さずに消えて見える**)
-  const preloadRef = useRef<readonly string[]>(preloadNames ?? [])
-  preloadRef.current = preloadNames ?? []
-  const [initialNames] = useState(() => model.resourceNames(preloadNames ?? []))
-  const resourceNamesRef = useRef<readonly string[]>(initialNames)
-  const [resourceKey, setResourceKey] = useState(() => initialNames.join(' '))
+  const [resourceKey, setResourceKey] = useState(() => view.resourceNames.join(' '))
+  useEffect(() => { view.setPreload(preloadNames ?? []) }, [preloadNames, view])
 
-  /** 名前が増えたら資源を作り直す。作り直すなら true */
-  const syncNames = useCallback((): boolean => {
-    const merged = model.resourceNames([...resourceNamesRef.current, ...preloadRef.current])
-    // 今の名前を全部含めて合わせたので、増えたかは数で分かる
-    if (merged.length === resourceNamesRef.current.length) return false
-    resourceNamesRef.current = merged
-    setResourceKey(merged.join(' '))
-    return true
+  // BoardView が頼む事: 名前が増えたら資源を作り直す・範囲が変わったら寄り直す・描く予約
+  hooksRef.current = {
+    names: names => setResourceKey(names.join(' ')),
+    resized: () => fitToSize(),
+    draw: () => requestDraw(),
+  }
+
+  // ─── 盤面の変化を絵へ当てる (#11) ──────────────────────────────────────────
+  // 振り分け (チャンクだけ・全部・範囲が変わった・知らない名前・読み込み中) は BoardView がする
+
+  // 作った時の盤面の結果を 1 回だけ知らせる (StrictMode の付け直しで 2 回にしない)
+  const initialReportedRef = useRef(false)
+  useEffect(() => {
+    if (initialReportedRef.current) return
+    initialReportedRef.current = true
+    onBoardAppliedRef.current?.(model.initial)
   }, [model])
-
-  useEffect(() => { syncNames() }, [preloadNames, syncNames])
-
-  // ─── 描く盤面の変化を絵へ当てる (#11) ──────────────────────────────────────
-  /**
-   * BoardModel が返した「何を作り直すか」に従う。
-   * - 知らない名前が出た: 資源を作り直す (作り直した時に、その時の盤面から構造を作る)
-   * - 読み込み中: 何もしない (準備ができた時に、その時の盤面から構造を作る)
-   * - 範囲が変わった: setStructure (グリッドも作り直す) と寄りの合わせ直し
-   * - それ以外: 変わったマスのチャンク (と、面で接する隣のチャンク) だけ。違いが多ければ全部
-   */
-  const handleUpdate = useCallback((u: ModelUpdate) => {
-    if (u.newNames.length > 0 && syncNames()) return
-    const renderer = rendererRef.current
-    if (!renderer || u.redraw.kind === 'none') return
-    if (u.redraw.kind === 'chunks') {
-      renderer.updateStructureBuffers(u.redraw.chunks.map(c => [c[0], c[1], c[2]]))
-    } else if (u.redraw.resized) {
-      renderer.setStructure(model.structure)
-      fitToSize()
-    } else {
-      renderer.updateStructureBuffers()
-    }
-    requestDraw()
-  }, [model, syncNames, fitToSize, requestDraw])
 
   useEffect(() => {
     if (appliedBoardRef.current === board) return
     appliedBoardRef.current = board
-    handleUpdate(model.setBoard(board))
-  }, [board, model, handleUpdate])
+    const { result } = view.setBoard(board)
+    onBoardAppliedRef.current?.(result)
+  }, [board, view])
 
-  const applyChanges = useCallback((changes: Iterable<CellChange>): ApplyResult => {
-    const u = model.applyChanges(changes)
-    handleUpdate(u)
-    return { changed: u.changed, outside: u.outside }
-  }, [model, handleUpdate])
+  const applyChanges = useCallback(
+    (changes: Iterable<CellChange>): ApplyResult => view.applyChanges(changes).result,
+    [view],
+  )
 
   const stateAt = useCallback((pos: Pos3) => model.stateAt(pos[0], pos[1], pos[2]), [model])
 
@@ -397,7 +412,7 @@ export function IsometricView({
   const hitBlock = useCallback(
     (clientX: number, clientY: number): Pos3 | null => {
       const canvas = canvasRef.current
-      if (!canvas || !rendererRef.current) return null
+      if (!canvas || !view.renderer) return null
       const rect = canvas.getBoundingClientRect()
       const cam = cameraRef.current
       const local = canvasPixelToBlock(
@@ -415,7 +430,7 @@ export function IsometricView({
       const min = model.min
       return [local[0] + min[0], local[1] + min[1], local[2] + min[2]]
     },
-    [cameraRef, sizeOf, localPlacementY, model],
+    [cameraRef, sizeOf, localPlacementY, model, view],
   )
 
   // ─── ピック (3D モード, redstone-sim#397) ──────────────────────────────────
@@ -426,7 +441,7 @@ export function IsometricView({
    */
   const currentView = useCallback(() => {
     const canvas = canvasRef.current
-    if (!canvas || !rendererRef.current) return null
+    if (!canvas || !view.renderer) return null
     const rect = canvas.getBoundingClientRect()
     if (rect.width <= 0 || rect.height <= 0 || canvas.clientHeight <= 0) return null
     const size = sizeOf()
@@ -441,7 +456,7 @@ export function IsometricView({
       vm: viewMatrixOf(cameraRef.current, size),
       pm: projMatrixOf(canvas.clientWidth / canvas.clientHeight),
     }
-  }, [cameraRef, sizeOf, model])
+  }, [cameraRef, sizeOf, model, view])
 
   /** 画面の点 (clientX/Y) の光線で、最初に当たる押せる素子。座標は世界の座標 */
   const pick3D = useCallback(
@@ -490,7 +505,8 @@ export function IsometricView({
     [onBlockClick, pick3D],
   )
 
-  useEffect(() => {
+  // 親の useLayoutEffect から使えるように、layout の段で入れる (passive の effect だと、親の useLayoutEffect ではまだ null)
+  useLayoutEffect(() => {
     if (!viewRef) return
     const handle: IsometricViewHandle = { blockToClient, invalidate: requestDraw, applyChanges, stateAt }
     viewRef.current = handle
@@ -566,7 +582,7 @@ export function IsometricView({
           const scale   = lastPinchDist.current / dist
           const newDist = Math.max(3, Math.min(zoomLimit(), cam.distance * scale))
 
-          if (topDown && rendererRef.current) {
+          if (topDown && view.renderer) {
             const canvas = canvasRef.current
             if (canvas) {
               // zoom-to-cursor（ピンチ中点を基準）。層の y は構造ローカル
@@ -632,7 +648,7 @@ export function IsometricView({
       const pos = hitBlock(e.clientX, e.clientY)
       if (pos) onBlockClick(pos, 'left')
     },
-    // zoomLimit は描く盤面 (model) と rendererRef だけを読むので、deps に入れない
+    // zoomLimit は描く盤面 (model) と view.renderer だけを読むので、deps に入れない
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [interactive, requestDraw, topDown, panMode, onBlockClick, hitBlock, onMouseDown, onMouseMove, onRightMouseMove, localPlacementY, sizeOf, cameraRef, getPanScale, updateHover],
   )
@@ -707,7 +723,7 @@ export function IsometricView({
       requestDraw()
       const cam = cameraRef.current
 
-      if (!topDown || !rendererRef.current) {
+      if (!topDown || !view.renderer) {
         cam.distance = Math.max(3, Math.min(zoomLimit(), cam.distance + e.deltaY * 0.05))
         return
       }
@@ -742,7 +758,7 @@ export function IsometricView({
 
     canvas.addEventListener('wheel', handleWheel, { passive: false })
     return () => canvas.removeEventListener('wheel', handleWheel)
-    // zoomLimit は描く盤面 (model) と rendererRef だけを読むので、deps に入れない
+    // zoomLimit は描く盤面 (model) と view.renderer だけを読むので、deps に入れない
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topDown, localPlacementY, sizeOf, cameraRef, interactive, requestDraw])
 
@@ -761,6 +777,8 @@ export function IsometricView({
 
     let cancelled = false
     let draw: (() => void) | null = null
+    /** この初期化で作った絵。片付けで、これが今の絵なら外す */
+    let attached: StructureRenderer | null = null
 
     ;(async () => {
       try {
@@ -769,10 +787,10 @@ export function IsometricView({
 
         // 取得先に届かなくても例外にせず、単色で描くリソースを返す (redstone-sim#395)
         const { resources, assets: builtAssets } = await buildResources(
-          [...resourceNamesRef.current], resourcePackUrl)
+          [...view.resourceNames], resourcePackUrl)
         if (cancelled) return
 
-        // **準備ができた時の盤面から構造を作る** (#11)。読み込み中に来た盤面の差し替えと変化も、
+        // **準備ができた時の盤面から構造を作る** (#11。BoardView.attach)。読み込み中に来た盤面の差し替えと変化も、
         // 描く盤面へ当ててあるので全部入る。移す元は effect が走った時の盤面で作っていたので、
         // 読み込み中の変化を落とし、アプリが onReady で描き直していた (redstone-sim#109)。
         //
@@ -781,9 +799,9 @@ export function IsometricView({
         // setStructure のたびに**盤面の空セル 1 個につき 12 本の線**を積んだ mesh を作り直す。
         // 描画するコードはこのリポジトリに 1 件も無いので、作った直後に捨てている。
         // 盤面の**体積**に比例するので、16x147x17 で 606ms / 64³ で 11.5 秒かかっていた (redstone-sim での実測)
-        const renderer = new StructureRenderer(gl, model.structure, resources,
-          { useInvisibleBlockBuffer: false })
-        rendererRef.current = renderer
+        const renderer = view.attach(structure => new StructureRenderer(gl, structure, resources,
+          { useInvisibleBlockBuffer: false }))
+        attached = renderer
 
         // アトラステクスチャの MIN_FILTER を NEAREST に（UV ブリード防止）
         const internal = renderer as unknown as { atlasTexture: WebGLTexture | null }
@@ -804,7 +822,8 @@ export function IsometricView({
         let readyFired = false
 
         draw = () => {
-          if (!rendererRef.current) return
+          // 資源の作り直しで外した絵は描かない (新しい絵ができたら、そちらの draw が描く)
+          if (view.renderer !== renderer) return
           const cam = cameraRef.current
 
           // 外部からのカメラ上書き (fitCamera 等) を消費する
@@ -869,7 +888,7 @@ export function IsometricView({
       cancelAnimationFrame(animFrameRef.current)
       animFrameRef.current = 0
       if (drawRef.current === draw) drawRef.current = null
-      rendererRef.current = null
+      if (attached) view.detach(attached)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resourceKey, resourcePackUrl]) // 初回マウント時 + 資源の名前が増えたとき (redstone-sim#234) + 資源の基点が変わったとき (redstone-sim#434)

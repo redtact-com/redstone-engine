@@ -3,7 +3,7 @@
  *
  * 盤面は **blockstate の文字列** で受ける (engine-js の `StateTable.name` の形)。エンジンの型にも
  * deepslate の型にも依らないので、描画の中身を替えても窓口は変わらない。
- * board のパッケージができるまではここに置き、6 本目で board へ移す (docs/architecture.md §1)。
+ * board のパッケージができるまではここに置き、6 本目で board へ移す (docs/architecture.md §1。view-3d は board の型には依ってよい)。
  */
 
 /** 世界の座標 [x, y, z] */
@@ -22,7 +22,8 @@ export interface BoardBounds {
  * - `blocks` の鍵は `"x,y,z"` (世界の座標。`cellKey` で作る)、値は blockstate の文字列。
  *   先頭の `minecraft:` は有っても無くてもよく、プロパティの並びも問わない (`normalizeState` でそろえる)。
  * - air・cave_air・void_air は何も無いマスとして扱う (書かなくてもよい)。
- * - 範囲の外のマスと、鍵が `"x,y,z"` の形でないマスは描かない (`ApplyResult.outside` に数える)。
+ * - 範囲の外のマスと、鍵が `"x,y,z"` の形 (どの部分も `/^-?\d+$/`) でないマスは描かない。
+ *   その数は `IsometricView` の `onBoardApplied` で知らせる (`ApplyResult.outside`)。
  */
 export interface Board {
   readonly bounds: BoardBounds
@@ -40,11 +41,17 @@ export interface CellChange {
   readonly state: string
 }
 
-/** 盤面の差し替えと `applyChanges` の結果 */
+/** 盤面の差し替え (`onBoardApplied`) と `applyChanges` の結果 */
 export interface ApplyResult {
-  /** 描く盤面の中で、状態が変わったマスの数 */
+  /**
+   * 描く盤面の中で、状態が変わったマスの数。同じマスが列に何度出ても 1 つと数え、最後の状態だけを当てる
+   * (A → B → A なら 0)
+   */
   readonly changed: number
-  /** 範囲の外 (と、座標の形が崩れたマス) で、描かなかった数 */
+  /**
+   * 描かなかった件数。範囲の外の何かあるマス (範囲の外の air は描く物が無いので数えない) と、
+   * 座標が崩れた物 (鍵が `"x,y,z"` の形でない・座標が整数でない。air でも数える)。件数なので、同じマスが 2 回出れば 2
+   */
   readonly outside: number
 }
 

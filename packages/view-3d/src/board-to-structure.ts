@@ -36,6 +36,7 @@ const NORMALIZED_LIMIT = 65536
  * - 空の `[]` は外す。`[` で始まって `]` で閉じない崩れた形は、そのまま 1 つの名前として扱う (描けずに消える)
  */
 export function normalizeState(state: string): string | null {
+  if (typeof state !== 'string') throw new TypeError(`blockstate が文字列でない: ${String(state)}`)
   const hit = normalized.get(state)
   if (hit !== undefined) return hit
   const out = normalize(state)
@@ -72,12 +73,15 @@ export function cellKey(x: number, y: number, z: number): string {
   return `${x},${y},${z}`
 }
 
-/** `"x,y,z"` を座標にする。3 つの整数でなければ null */
+/** 鍵の 1 つの部分 (符号と数字だけ。空白・`+`・小数点・指数は崩れた形) */
+const KEY_PART = /^-?\d+$/
+
+/** `"x,y,z"` を座標にする。3 つの部分がどれも整数の字面 (`/^-?\d+$/`) でなければ null */
 function parseKey(key: string): Pos3 | null {
   const parts = key.split(',')
-  if (parts.length !== 3) return null
-  const p = parts.map(v => (v.trim() === '' ? NaN : Number(v))) as Pos3
-  return p.every(Number.isInteger) ? p : null
+  if (parts.length !== 3 || !parts.every(v => KEY_PART.test(v))) return null
+  const p = parts.map(Number) as Pos3
+  return p.every(Number.isSafeInteger) ? p : null
 }
 
 // ── 描く名前 ──────────────────────────────────────────────────────────────
@@ -235,10 +239,14 @@ export class BoardModel {
   /** 盤面と変化に出た描く名前 (増えるだけ) */
   readonly #names = new Set<string>()
 
+  /** 作った時の盤面を当てた結果 (IsometricView が `onBoardApplied` で 1 回知らせる) */
+  readonly initial: ApplyResult
+
   constructor(board: Board) {
     this.#range = rangeOf(board.bounds)
     this.#structure = new CellStructure(this.#range.size)
-    this.setBoard(board)
+    const u = this.setBoard(board)
+    this.initial = { changed: u.changed, outside: u.outside }
   }
 
   /** 範囲の最小 (構造ローカルの原点の世界の座標) */
@@ -282,8 +290,10 @@ export class BoardModel {
   /**
    * 盤面を差し替える。今の盤面と文字列で比べ、範囲が同じなら違うマスだけを直す。
    * 範囲が違えば丸ごと作り直す。`applyChanges` で当てた分も、この盤面に合わせて比べ直す。
+   * 盤面を全部読んで確かめてから書き換えるので、途中で投げても (範囲の誤り・文字列でない値) 描く盤面は変わらない。
    */
   setBoard(board: Board): ModelUpdate {
+    // 1. 読み切る。投げるならここで投げる
     const range = rangeOf(board.bounds)
     const next = new Map<string, string>()
     let outside = 0
@@ -291,12 +301,14 @@ export class BoardModel {
       const state = normalizeState(raw)
       const p = parseKey(key)
       if (p === null || !this.#insideOf(range, p)) {
+        // 数えるのは、崩れた鍵と、範囲の外の何かあるマス (範囲の外の air は描く物が無いので数えない)
         if (state !== null || p === null) outside++
         continue
       }
       if (state !== null) next.set(cellKey(p[0], p[1], p[2]), state)
     }
 
+    // 2. 書き換える (ここからは投げない)
     const newNames: string[] = []
     const resized = !sameRange(range, this.#range)
     if (resized) {
@@ -331,21 +343,32 @@ export class BoardModel {
 
   /**
    * 変化の列を当てる。列は呼んだその場で読み切り、持ち続けない。
-   * 範囲の外と、座標が整数でない変化は描かずに数える。同じマスが何度も出たら、後の物が残る。
+   *
+   * - 先に列を全部読み、座標の確かめと正規化を済ませてから書き換える。列が途中で投げても
+   *   (生成器の例外・文字列でない状態)、描く盤面は変わらない (作り直すチャンクと新しい名前を捨てて、絵が古いまま残らない)
+   * - 同じマスが何度も出たら、最後の状態だけを当てる (A → B → A なら何も変えない。一時の名前で資源を作り直さない)
+   * - 範囲の外と、座標が整数でない変化は描かずに数える (範囲の外の air は数えない。`ApplyResult.outside`)
    */
   applyChanges(changes: Iterable<CellChange>): ModelUpdate {
-    const dirty = new ChunkSet(this.#range.size)
-    const newNames: string[] = []
-    let changed = 0
+    // 1. 読み切る。投げるならここで投げる
+    const last = new Map<string, { readonly p: Pos3; readonly state: string | null }>()
     let outside = 0
     for (const c of changes) {
       const p: Pos3 = [c.x, c.y, c.z]
-      if (!p.every(Number.isInteger) || !this.#insideOf(this.#range, p)) {
-        outside++
+      const state = normalizeState(c.state)
+      const malformed = !p.every(Number.isSafeInteger)
+      if (malformed || !this.#insideOf(this.#range, p)) {
+        if (malformed || state !== null) outside++
         continue
       }
-      const state = normalizeState(c.state)
-      const k = cellKey(p[0], p[1], p[2])
+      last.set(cellKey(p[0], p[1], p[2]), { p, state })
+    }
+
+    // 2. 書き換える (ここからは投げない)
+    const dirty = new ChunkSet(this.#range.size)
+    const newNames: string[] = []
+    let changed = 0
+    for (const [k, { p, state }] of last) {
       if ((this.#states.get(k) ?? null) === state) continue
       this.#put(k, p, state, newNames)
       dirty.touch(this.#local(p))
@@ -423,5 +446,134 @@ class ChunkSet {
     const total = this.#counts[0] * this.#counts[1] * this.#counts[2]
     if (this.#set.size > Math.min(MAX_CHUNK_LIST, total / 2)) return { kind: 'full', resized: false }
     return { kind: 'chunks', chunks: [...this.#set.values()] }
+  }
+}
+
+// ── 描く盤面と絵のつなぎ ──────────────────────────────────────────────────
+
+/** 絵 (deepslate の StructureRenderer) のうち、BoardView が呼ぶ口。試験では呼ばれた口を記録する偽物を渡す */
+export interface RedrawTarget {
+  setStructure(structure: StructureProvider): void
+  updateStructureBuffers(chunkPositions?: BlockPos[]): void
+}
+
+/** BoardView が IsometricView に頼む事 */
+export interface ViewHooks {
+  /** 資源を作る名前が増えた。資源を作り直し、できたら `attach` する (それまで絵は外してある) */
+  names(names: readonly string[]): void
+  /** 範囲が変わり、絵の構造を差し替えた。寄りを合わせ直す */
+  resized(size: BlockPos): void
+  /** 次のフレームで描く */
+  draw(): void
+}
+
+/** 盤面の変化を絵へ当てた道 */
+export type RedrawStep =
+  /** 何も変わらない */
+  | 'none'
+  /** 絵がまだ無い (読み込み中)。`attach` の時に、その時の構造から作る */
+  | 'loading'
+  /** 知らない名前が出た。絵を外して資源を作り直す */
+  | 'names'
+  /** 変わったチャンクだけを作り直した */
+  | 'chunks'
+  /** 全部を作り直した (範囲は同じ) */
+  | 'all'
+  /** 範囲が変わった。構造を差し替え、寄りを合わせ直した */
+  | 'resized'
+
+export interface ViewUpdate {
+  readonly result: ApplyResult
+  readonly step: RedrawStep
+}
+
+/**
+ * 描く盤面 (BoardModel) と絵の間の振り分け。IsometricView はこれを持ち、絵 (StructureRenderer) を
+ * 作った時に `attach`、作り直す時と外す時に `detach` するだけにする。React と WebGL に依らないので、
+ * 偽の絵で試せる (読み込み中の変化・チャンクだけ・全部・範囲の変更と寄り直し・新しい名前での作り直し)。
+ */
+export class BoardView<R extends RedrawTarget = RedrawTarget> {
+  readonly model: BoardModel
+  readonly #hooks: ViewHooks
+  #renderer: R | null = null
+  #names: readonly string[]
+  #preload: readonly string[]
+
+  constructor(board: Board, preload: readonly string[], hooks: ViewHooks) {
+    this.model = new BoardModel(board)
+    this.#hooks = hooks
+    this.#preload = preload
+    this.#names = this.model.resourceNames(preload)
+  }
+
+  /** 今の絵。読み込み中と、資源を作り直している間は null */
+  get renderer(): R | null {
+    return this.#renderer
+  }
+
+  /** 先に資源を作る名前 (名前順・増えるだけ) */
+  get resourceNames(): readonly string[] {
+    return this.#names
+  }
+
+  /** `preloadNames` が変わった。名前が増えたら資源を作り直す (true) */
+  setPreload(preload: readonly string[]): boolean {
+    this.#preload = preload
+    return this.#syncNames()
+  }
+
+  setBoard(board: Board): ViewUpdate {
+    return this.#apply(this.model.setBoard(board))
+  }
+
+  applyChanges(changes: Iterable<CellChange>): ViewUpdate {
+    return this.#apply(this.model.applyChanges(changes))
+  }
+
+  /**
+   * 資源ができた時に呼ぶ。**その時の構造から**絵を作る (読み込み中に当てた盤面と変化も入る。redstone-sim#109)。
+   */
+  attach(make: (structure: StructureProvider) => R): R {
+    const r = make(this.model.structure)
+    this.#renderer = r
+    return r
+  }
+
+  /** 絵を外す (資源の作り直し・unmount)。`renderer` を渡すと、それが今の絵の時だけ外す */
+  detach(renderer?: R): void {
+    if (renderer === undefined || this.#renderer === renderer) this.#renderer = null
+  }
+
+  /** 名前が増えたら絵を外し、資源の作り直しを頼む */
+  #syncNames(): boolean {
+    const merged = this.model.resourceNames([...this.#names, ...this.#preload])
+    // 今の名前を全部含めて合わせたので、増えたかは数で分かる
+    if (merged.length === this.#names.length) return false
+    this.#names = merged
+    this.#renderer = null
+    this.#hooks.names(merged)
+    return true
+  }
+
+  #apply(u: ModelUpdate): ViewUpdate {
+    const result: ApplyResult = { changed: u.changed, outside: u.outside }
+    if (u.newNames.length > 0 && this.#syncNames()) return { result, step: 'names' }
+    const r = this.#renderer
+    if (u.redraw.kind === 'none') return { result, step: 'none' }
+    if (r === null) return { result, step: 'loading' }
+    let step: RedrawStep
+    if (u.redraw.kind === 'chunks') {
+      r.updateStructureBuffers(u.redraw.chunks.map(c => [c[0], c[1], c[2]]))
+      step = 'chunks'
+    } else if (u.redraw.resized) {
+      r.setStructure(this.model.structure)
+      this.#hooks.resized(this.model.structure.getSize())
+      step = 'resized'
+    } else {
+      r.updateStructureBuffers()
+      step = 'all'
+    }
+    this.#hooks.draw()
+    return { result, step }
   }
 }

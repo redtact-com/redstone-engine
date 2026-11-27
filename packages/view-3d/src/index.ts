@@ -18,7 +18,8 @@
  * viewRef.current?.applyChanges(list)
  * ```
  *
- * - engine-js・board に依らない。窓口 (props・命令の口・書き出す型) に deepslate の型を出さない
+ * - engine-js と @redstone/sim に依らない。board には型だけ依ってよい (今は窓口の型を src/types.ts に置き、6 本目で board へ移す)。
+ *   窓口 (props・命令の口・書き出す型) に deepslate の型を出さない
  * - 押せるかの意味は持たない。アプリが `pickRole` で渡す (素通りの一覧と「一覧に無い物は遮る」だけを持つ)
  * - テクスチャとモデルは同梱しない。実行時に misode/mcmeta と PrismarineJS/minecraft-assets から取る
  *   (raw.githubusercontent.com → cdn.jsdelivr.net。docs/ip-policy.md §2)。取れなければ単色で描く

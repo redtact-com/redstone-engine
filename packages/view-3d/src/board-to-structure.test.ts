@@ -1,8 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { readFileSync, readdirSync } from 'node:fs'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { StructureProvider } from 'deepslate/core'
-import { BoardModel, CHUNK_SIZE, MAX_CHUNK_LIST, cellKey, normalizeState, resourceNameOf, type Redraw } from './board-to-structure'
+import ts from 'typescript'
+import type { BlockPos, StructureProvider } from 'deepslate/core'
+import {
+  BoardModel, BoardView, CHUNK_SIZE, MAX_CHUNK_LIST, cellKey, normalizeState, resourceNameOf,
+  type Redraw, type RedrawTarget, type ViewHooks,
+} from './board-to-structure'
+import { releaseIfDetached } from './IsometricView'
 import { defaultPropsOf } from './renderer/buildResources'
 import type { Board, BoardBounds, CellChange } from './types'
 
@@ -183,14 +189,19 @@ describe('盤面から構造を作る', () => {
     expect(m.stateAt(0, 64, 11)).toBeNull()
   })
 
-  it('範囲の外のマスと、鍵が "x,y,z" の形でないマスは描かずに数える (範囲の外の air は数えない)', () => {
+  it('範囲の外のマスと、鍵が "x,y,z" の形でないマスは描かずに数える (範囲の外の air は数えない・崩れた鍵は air でも数える)', () => {
     const m = new BoardModel(boardOf(bounds([0, 0, 0], [1, 1, 1]), {}))
     const u = m.setBoard(boardOf(bounds([0, 0, 0], [1, 1, 1]), {
       '0,0,0': 'stone', '2,0,0': 'stone', '0,-1,0': LAMP(true), '5,5,5': 'air', 'a,b,c': 'stone', '1,1': 'stone', '1.5,0,0': 'stone',
+      // 鍵の各部分は /^-?\d+$/ (空白・+・指数・空は崩れた形)
+      ' 1,0,0': 'stone', '+1,0,0': 'stone', '1e0,0,0': 'stone', '1,0,0 ': 'stone', ',0,0': 'stone', '1,0,0,': 'air',
     }))
-    expect(u.outside).toBe(5)
+    expect(u.outside).toBe(11)
     expect(u.changed).toBe(1)
     expect(entries(m.structure)).toEqual(['0,0,0=minecraft:stone'])
+    // 符号と頭の 0 は整数の字面
+    expect(m.setBoard(boardOf(bounds([-1, 0, 0], [1, 1, 1]), { '-1,0,0': 'stone', '01,0,0': 'glass' })).outside).toBe(0)
+    expect(m.stateAt(1, 0, 0)).toBe('glass')
   })
 
   it('同じ文字列のマスは deepslate の状態を 1 つだけ作る (パレットは文字列で重複を除く)', () => {
@@ -207,6 +218,18 @@ describe('盤面から構造を作る', () => {
     m.applyChanges([{ x: 1, y: 0, z: 0, state: 'stone' }])
     expect(m.structure.getBlocks()).not.toBe(first)
     expect(m.structure.getBlocks()).toHaveLength(2)
+  })
+
+  it('盤面が途中で投げても (文字列でない値・範囲の誤り)、描く盤面は変わらない', () => {
+    const b = bounds([0, 0, 0], [3, 0, 0])
+    const m = new BoardModel(boardOf(b, { '0,0,0': 'stone' }))
+    const before = entries(m.structure)
+    const bad = new Map<string, string>([['1,0,0', 'glass'], ['2,0,0', 42 as unknown as string]])
+    expect(() => m.setBoard({ bounds: b, blocks: bad })).toThrow(TypeError)
+    expect(() => m.setBoard(boardOf({ x: [0, 0.5], y: [0, 0], z: [0, 0] }, { '1,0,0': 'glass' }))).toThrow(RangeError)
+    expect(entries(m.structure)).toEqual(before)
+    expect(m.stateAt(1, 0, 0)).toBeNull()
+    expect([...m.names]).toEqual(['stone'])
   })
 
   it('範囲が整数でなければ RangeError。最大が最小より小さい軸は大きさ 0', () => {
@@ -259,12 +282,15 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
     expect(m.setBoard(boardOf(b, next))).toMatchObject({ changed: 0, redraw: { kind: 'none' } })
   })
 
-  it('種を固定した乱数の変化の列 (applyChanges・setBoard・範囲の変更を混ぜる) でも、毎回同じ', () => {
+  it('種を固定した乱数の変化の列 (applyChanges・setBoard・範囲の変更を混ぜる) でも、毎回同じ。changed と newNames も正しい', () => {
     const rnd = seeded(11)
     const pool = [
       'stone', 'minecraft:stone', 'glass', LEVER_OFF, LEVER_ON, 'lever[powered=true,facing=north,face=floor]',
       WIRE(0), WIRE(7), WIRE(15), LAMP(false), LAMP(true), 'air', 'minecraft:cave_air', 'shulker_box[facing=up]',
+      'redstone_torch[lit=true]', 'iron_bars[east=false,north=false,south=false,waterlogged=false,west=false]',
     ]
+    // 初めの盤面には pool の一部だけを置く (新しい名前の道を通すため)
+    const firstPool = pool.slice(0, 4)
     const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(rnd() * xs.length)]
     const int = (lo: number, hi: number) => lo + Math.floor(rnd() * (hi - lo + 1))
 
@@ -272,15 +298,27 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
     const truth = new Map<string, string>()           // 今の盤面 (アプリが持つ写しの代わり)
     const inside = (x: number, y: number, z: number) =>
       x >= b.x[0] && x <= b.x[1] && y >= b.y[0] && y <= b.y[1] && z >= b.z[0] && z <= b.z[1]
-    for (let i = 0; i < 400; i++) truth.set(cellKey(int(-5, 34), int(0, 17), int(3, 38)), pick(pool))
+    /** 盤面を正規化した表 (何も無いマスは持たない) */
+    const normalizedOf = (t: Map<string, string>) => {
+      const out = new Map<string, string>()
+      for (const [k, v] of t) {
+        const n = normalizeState(v)
+        if (n !== null) out.set(k, n)
+      }
+      return out
+    }
+    for (let i = 0; i < 400; i++) truth.set(cellKey(int(-5, 34), int(0, 17), int(3, 38)), pick(firstPool))
     const m = new BoardModel(boardOf(b, truth))
-    const kinds = { chunks: 0, full: 0, none: 0, resized: 0 }
+    const seen = new Set(m.names)
+    expect([...seen].sort()).toEqual(['glass', 'lever', 'stone'])
+    const kinds = { chunks: 0, full: 0, none: 0, resized: 0, named: 0, resizedNamed: 0 }
 
-    for (let step = 0; step < 120; step++) {
+    for (let step = 0; step < 160; step++) {
       const before = chunkSignatures(m.structure)
+      const prev = normalizedOf(truth)
       const r = rnd()
-      let redraw: Redraw
-      if (r < 0.75) {
+      let u: ReturnType<BoardModel['applyChanges']>
+      if (r < 0.72) {
         // 変化の列。たいていは数件で、たまに多い。範囲の外と同じマスの重なりも混ぜる
         const n = rnd() < 0.85 ? int(1, 6) : int(40, 120)
         const list: CellChange[] = []
@@ -289,39 +327,55 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
           const coord = (lo: number, hi: number) => (near ? Math.min(hi, lo + 16 * int(0, 2) + pick([-1, 0, 15, 16])) : int(lo - 2, hi + 2))
           list.push({ x: coord(b.x[0], b.x[1]), y: coord(b.y[0], b.y[1]), z: coord(b.z[0], b.z[1]), state: pick(pool) })
         }
-        const u = m.applyChanges(list)
+        u = m.applyChanges(list)
         let outside = 0
         for (const c of list) {
-          if (!inside(c.x, c.y, c.z)) { outside++; continue }
+          if (!inside(c.x, c.y, c.z)) {
+            if (normalizeState(c.state) !== null) outside++
+            continue
+          }
           truth.set(cellKey(c.x, c.y, c.z), c.state)
         }
         expect(u.outside, `step ${step}`).toBe(outside)
-        redraw = u.redraw
-      } else if (r < 0.93) {
+      } else if (r < 0.9) {
         // 盤面の差し替え (同じ範囲)。いくつかを変え、いくつかを消す
-        for (let i = 0; i < int(1, 30); i++) {
+        const n = int(1, 30)
+        for (let i = 0; i < n; i++) {
           const k = cellKey(int(b.x[0], b.x[1]), int(b.y[0], b.y[1]), int(b.z[0], b.z[1]))
           if (rnd() < 0.3) truth.delete(k)
           else truth.set(k, pick(pool))
         }
-        redraw = m.setBoard(boardOf(b, truth)).redraw
+        u = m.setBoard(boardOf(b, truth))
       } else {
-        // 範囲を変える (広げるか縮める)。範囲の外になったマスは盤面から外す
+        // 範囲を変える (広げるか縮める)。範囲の外になったマスは盤面から外し、新しい範囲にいくつか置く
         const grow = rnd() < 0.5 ? 3 : -3
         b = bounds([b.x[0] - grow, b.y[0], b.z[0]], [b.x[1] + grow, b.y[1], b.z[1] + grow])
         for (const k of [...truth.keys()]) {
           const [x, y, z] = k.split(',').map(Number)
           if (!inside(x, y, z)) truth.delete(k)
         }
-        const u = m.setBoard(boardOf(b, truth))
+        const n = int(1, 3)
+        for (let i = 0; i < n; i++) truth.set(cellKey(int(b.x[0], b.x[1]), int(b.y[0], b.y[1]), int(b.z[0], b.z[1])), pick(pool))
+        u = m.setBoard(boardOf(b, truth))
         expect(u.redraw, `step ${step}`).toEqual({ kind: 'full', resized: true })
-        redraw = u.redraw
         kinds.resized++
+        if (u.newNames.length > 0) kinds.resizedNamed++
       }
-      if (redraw.kind !== 'full' || !redraw.resized) {
-        expectChunksCover(before, chunkSignatures(m.structure), redraw, `step ${step}`)
+
+      // 数と名前: 正しい値 (前後の盤面の違い・初めて出た名前) と比べる
+      const next = normalizedOf(truth)
+      let changed = 0
+      for (const k of new Set([...prev.keys(), ...next.keys()])) if (prev.get(k) !== next.get(k)) changed++
+      const fresh = [...new Set([...next.values()].map(v => resourceNameOf(v) as string))].filter(n => !seen.has(n)).sort()
+      fresh.forEach(n => seen.add(n))
+      expect(u.changed, `step ${step} changed`).toBe(changed)
+      expect([...u.newNames].sort(), `step ${step} newNames`).toEqual(fresh)
+      if (fresh.length > 0) kinds.named++
+
+      if (u.redraw.kind !== 'full' || !u.redraw.resized) {
+        expectChunksCover(before, chunkSignatures(m.structure), u.redraw, `step ${step}`)
       }
-      kinds[redraw.kind]++
+      kinds[u.redraw.kind]++
       expectSameStructure(m.structure, new BoardModel(boardOf(b, truth)).structure, `step ${step}`)
       for (const [k, v] of truth) {
         const [x, y, z] = k.split(',').map(Number)
@@ -332,6 +386,85 @@ describe('差分で直した構造は、同じ盤面から丸ごと作った構�
     expect(kinds.chunks).toBeGreaterThan(30)
     expect(kinds.full - kinds.resized).toBeGreaterThan(3)
     expect(kinds.resized).toBeGreaterThan(3)
+    expect(kinds.named).toBeGreaterThan(0)
+    expect([...seen].sort()).toEqual(['glass', 'iron_bars', 'lever', 'purple_shulker_box', 'redstone_lamp', 'redstone_torch', 'redstone_wire', 'stone'])
+  })
+
+  it('範囲を広げると同時に新しい名前を置くと、newNames と changed を返し、そのマスを描く', () => {
+    const m = new BoardModel(boardOf(bounds([0, 0, 0], [3, 0, 0]), { '0,0,0': 'stone', '3,0,0': LEVER_OFF }))
+    const u = m.setBoard(boardOf(bounds([0, 0, 0], [7, 2, 0]), {
+      '0,0,0': 'stone', '3,0,0': LEVER_ON, '6,2,0': LAMP(true), '7,0,0': 'minecraft:glass',
+    }))
+    expect(u.redraw).toEqual({ kind: 'full', resized: true })
+    expect([...u.newNames].sort()).toEqual(['glass', 'redstone_lamp'])
+    expect(u.changed).toBe(3)   // レバーが変わり、ランプとガラスが増えた (石はそのまま)
+    expect(m.structure.getSize()).toEqual([8, 3, 1])
+    expect(m.structure.getBlock([6, 2, 0])?.state.toString()).toBe(`minecraft:${LAMP(true)}`)
+    // 縮めると、外に出たマスは消えたと数える
+    const v = m.setBoard(boardOf(bounds([0, 0, 0], [3, 0, 0]), { '0,0,0': 'stone', '3,0,0': LEVER_ON }))
+    expect(v).toMatchObject({ changed: 2, newNames: [], redraw: { kind: 'full', resized: true } })
+  })
+})
+
+describe('applyChanges は列を読み切ってから当てる', () => {
+  const b = bounds([0, 0, 0], [40, 3, 40])   // 3 x 1 x 3 チャンク
+  const start = () => new BoardModel(boardOf(b, { '0,0,0': 'stone', '20,0,0': LEVER_OFF }))
+
+  it('列が途中で投げたら、描く盤面は変わらない。同じ列を当て直すと、作り直す物と新しい名前が返る', () => {
+    const m = start()
+    const before = entries(m.structure)
+    function* broken(): Generator<CellChange> {
+      yield { x: 20, y: 0, z: 0, state: LEVER_ON }
+      yield { x: 5, y: 1, z: 1, state: LAMP(true) }
+      throw new Error('列の途中で失敗')
+    }
+    expect(() => m.applyChanges(broken())).toThrow('列の途中で失敗')
+    expect(entries(m.structure)).toEqual(before)
+    expect(m.stateAt(20, 0, 0)).toBe(LEVER_OFF)
+    expect([...m.names].sort()).toEqual(['lever', 'stone'])
+
+    // 当て直すと、当たっていなかったので全部が変化として返る
+    const u = m.applyChanges([{ x: 20, y: 0, z: 0, state: LEVER_ON }, { x: 5, y: 1, z: 1, state: LAMP(true) }])
+    expect(u).toMatchObject({ changed: 2, newNames: ['redstone_lamp'] })
+    expect(u.redraw.kind).toBe('chunks')
+  })
+
+  it('文字列でない状態があれば TypeError で、どのマスも当てない', () => {
+    const m = start()
+    const before = entries(m.structure)
+    expect(() => m.applyChanges([
+      { x: 1, y: 0, z: 0, state: 'glass' },
+      { x: 2, y: 0, z: 0, state: null as unknown as string },
+    ])).toThrow(TypeError)
+    expect(entries(m.structure)).toEqual(before)
+  })
+
+  it('同じマスは最後の状態だけを当て、マスの数で返す (A → B → A なら何もしない。一時の名前で資源を作り直さない)', () => {
+    const m = start()
+    expect(m.applyChanges([
+      { x: 20, y: 0, z: 0, state: LAMP(true) },
+      { x: 20, y: 0, z: 0, state: 'minecraft:lever[powered=false,face=floor,facing=north]' },
+    ])).toMatchObject({ changed: 0, newNames: [], redraw: { kind: 'none' } })
+    expect(m.names.has('redstone_lamp')).toBe(false)
+    const u = m.applyChanges([
+      { x: 20, y: 0, z: 0, state: LEVER_ON },
+      { x: 20, y: 0, z: 0, state: LEVER_OFF },
+      { x: 20, y: 0, z: 0, state: LEVER_ON },
+    ])
+    expect(u.changed).toBe(1)
+    expect(m.stateAt(20, 0, 0)).toBe(LEVER_ON)
+  })
+
+  it('範囲の外は件数で数える。範囲の外の air は数えず、座標が崩れた物は air でも数える', () => {
+    const m = start()
+    const u = m.applyChanges([
+      { x: 41, y: 0, z: 0, state: 'stone' },
+      { x: 41, y: 0, z: 0, state: 'stone' },
+      { x: 0, y: 4, z: 0, state: 'air' },
+      { x: -1, y: 0, z: 0, state: 'minecraft:cave_air' },
+      { x: 1.5, y: 0, z: 0, state: 'air' },
+    ])
+    expect(u).toMatchObject({ changed: 0, outside: 3 })
   })
 })
 
@@ -413,6 +546,138 @@ describe('読み込み中の変化 (redstone-sim#109)', () => {
   })
 })
 
+/** 呼ばれた口を記録する偽の絵 (deepslate の StructureRenderer の代わり) */
+class FakeRenderer implements RedrawTarget {
+  readonly calls: string[] = []
+  structure: StructureProvider
+  constructor(structure: StructureProvider) {
+    this.structure = structure
+  }
+  setStructure(structure: StructureProvider): void {
+    this.structure = structure
+    this.calls.push(`setStructure ${structure.getSize().join('x')}`)
+  }
+  updateStructureBuffers(chunks?: BlockPos[]): void {
+    this.calls.push(chunks === undefined ? 'all' : `chunks ${chunks.map(c => c.join(',')).sort().join(' ')}`)
+  }
+}
+
+/** IsometricView の代わりに、頼まれた事を記録する */
+function recorder() {
+  const log: string[] = []
+  const hooks: ViewHooks = {
+    names: names => log.push(`names ${names.join(',')}`),
+    resized: size => log.push(`resized ${size.join('x')}`),
+    draw: () => log.push('draw'),
+  }
+  return { log, hooks }
+}
+
+describe('盤面の変化を絵へ当てる配線 (BoardView。IsometricView が使う)', () => {
+  // 48 x 4 x 48: 3 x 1 x 3 チャンク (半分は 4.5)
+  const b = bounds([0, 0, 0], [47, 3, 47])
+  const initial = { '0,0,0': 'stone', '20,1,20': LEVER_OFF }
+
+  it('読み込み中は絵に触らず、準備ができた時 (attach) に、その時の構造から絵を作る', () => {
+    const { log, hooks } = recorder()
+    const view = new BoardView<FakeRenderer>(boardOf(b, initial), ['stone', 'lever'], hooks)
+    expect(view.renderer).toBeNull()
+    expect(view.applyChanges([{ x: 20, y: 1, z: 20, state: LEVER_ON }]).step).toBe('loading')
+    // 読み込み中に範囲が変わっても、絵が無いので寄り直しは頼まない (attach の後に IsometricView が合わせる)
+    const bigger = bounds([0, 0, 0], [63, 3, 47])
+    expect(view.setBoard(boardOf(bigger, { '0,0,0': 'stone', '20,1,20': LEVER_ON, '60,0,0': 'stone' })).step).toBe('loading')
+    expect(log).toEqual([])
+
+    let given: StructureProvider | null = null
+    const r = view.attach(structure => (given = structure, new FakeRenderer(structure)))
+    expect(view.renderer).toBe(r)
+    expect(given).toBe(view.model.structure)
+    expectSameStructure(r.structure, new BoardModel(boardOf(bigger, { '0,0,0': 'stone', '20,1,20': LEVER_ON, '60,0,0': 'stone' })).structure)
+    expect(r.calls).toEqual([])
+  })
+
+  it('準備ができた後: 数マスならチャンクだけ、多ければ全部、範囲が変われば構造の差し替えと寄り直し。どれも描く予約をする', () => {
+    const { log, hooks } = recorder()
+    const view = new BoardView<FakeRenderer>(boardOf(b, initial), [], hooks)
+    const r = view.attach(structure => new FakeRenderer(structure))
+
+    expect(view.applyChanges([{ x: 20, y: 1, z: 20, state: LEVER_ON }]).step).toBe('chunks')
+    expect(view.applyChanges([{ x: 16, y: 0, z: 5, state: 'stone' }]).step).toBe('chunks')   // 境の隣も
+    const many = [0, 1, 2].flatMap(cx => [0, 1, 2].map(cz => ({ x: cx * 16 + 5, y: 2, z: cz * 16 + 5, state: 'stone' })))
+    expect(view.applyChanges(many).step).toBe('all')
+    expect(view.applyChanges(many).step).toBe('none')                                    // 同じ物は何もしない
+    const resized = view.setBoard(boardOf(bounds([0, 0, 0], [15, 3, 15]), { '0,0,0': 'stone' }))
+    expect(resized).toEqual({ step: 'resized', result: { changed: 11, outside: 0 } })
+    expect(r.structure).toBe(view.model.structure)
+
+    expect(r.calls).toEqual(['chunks 1,0,1', 'chunks 0,0,0 1,0,0', 'all', 'setStructure 16x4x16'])
+    expect(log).toEqual(['draw', 'draw', 'draw', 'resized 16x4x16', 'draw'])
+  })
+
+  it('知らない名前が出たら、絵を外して資源の作り直しを頼む。作り直す間の変化も、次の attach の構造に入る', () => {
+    const { log, hooks } = recorder()
+    const view = new BoardView<FakeRenderer>(boardOf(b, initial), ['stone'], hooks)
+    expect(view.resourceNames).toEqual(['lever', 'stone'])
+    const r = view.attach(structure => new FakeRenderer(structure))
+
+    const u = view.applyChanges([{ x: 3, y: 0, z: 3, state: LAMP(true) }])
+    expect(u).toEqual({ step: 'names', result: { changed: 1, outside: 0 } })
+    expect(view.renderer).toBeNull()
+    expect(log).toEqual(['names lever,redstone_lamp,stone'])
+    expect(r.calls).toEqual([])                                  // 外した絵には当てない
+    expect(view.applyChanges([{ x: 4, y: 0, z: 3, state: LAMP(false) }]).step).toBe('loading')
+
+    const r2 = view.attach(structure => new FakeRenderer(structure))
+    expect(r2.structure.getBlock([4, 0, 3])?.state.toString()).toBe(`minecraft:${LAMP(false)}`)
+    expect(r2.structure.getBlock([3, 0, 3])?.state.toString()).toBe(`minecraft:${LAMP(true)}`)
+    // 名前は増えるだけ。preloadNames が知らない名前を足した時も作り直す
+    expect(view.setPreload(['stone'])).toBe(false)
+    expect(view.setPreload(['minecraft:glass[]', 'stone'])).toBe(true)
+    expect(log.at(-1)).toBe('names glass,lever,redstone_lamp,stone')
+  })
+
+  it('detach は、渡した絵が今の絵の時だけ外す (古い初期化の片付けが、新しい絵を外さない)', () => {
+    const view = new BoardView<FakeRenderer>(boardOf(b, initial), [], recorder().hooks)
+    const old = view.attach(structure => new FakeRenderer(structure))
+    const now = view.attach(structure => new FakeRenderer(structure))
+    view.detach(old)
+    expect(view.renderer).toBe(now)
+    view.detach(now)
+    expect(view.renderer).toBeNull()
+  })
+
+  it('作った時の盤面の結果 (onBoardApplied で知らせる数) を持つ', () => {
+    const m = new BoardModel(boardOf(bounds([0, 0, 0], [1, 0, 0]), { '0,0,0': 'stone', '5,0,0': 'stone', '1,0,0': 'air' }))
+    expect(m.initial).toEqual({ changed: 1, outside: 1 })
+  })
+})
+
+describe('WebGL の文脈を手放す (IsometricView の releaseIfDetached)', () => {
+  function fakeCanvas(isConnected: boolean, hasGl = true) {
+    let lost = 0
+    const ext = { loseContext: () => { lost++ } }
+    const gl = { getExtension: (name: string) => (name === 'WEBGL_lose_context' ? ext : null) }
+    const canvas = {
+      isConnected,
+      getContext: (id: 'webgl') => (id === 'webgl' && hasGl ? gl as unknown as WebGLRenderingContext : null),
+    }
+    return { canvas, lost: () => lost }
+  }
+
+  it('canvas が DOM に残っている間 (Activity の hidden・StrictMode の付け直し) は手放さない', () => {
+    const c = fakeCanvas(true)
+    expect(releaseIfDetached(c.canvas)).toBe(false)
+    expect(c.lost()).toBe(0)
+  })
+
+  it('DOM から外れていたら手放す。WebGL が無ければ何もしない', () => {
+    const c = fakeCanvas(false)
+    expect(releaseIfDetached(c.canvas)).toBe(true)
+    expect(c.lost()).toBe(1)
+    expect(releaseIfDetached(fakeCanvas(false, false).canvas)).toBe(true)
+  })
+})
+
 describe('既定のプロパティ (buildResources の defaultPropsOf。redstone-sim#343)', () => {
   // 盤面の文字列がプロパティを省いていても、variant の値から補って描く (補わないと何も描かれず消える)
   it('既定プロパティは variant の値から作る (原木は縦置き・雪は無し)', () => {
@@ -433,23 +698,221 @@ describe('既定のプロパティ (buildResources の defaultPropsOf。redstone
   })
 })
 
-describe('依存の向き (docs/architecture.md §1・§2)', () => {
-  const srcDir = fileURLToPath(new URL('.', import.meta.url))
-  const files = (readdirSync(srcDir, { recursive: true }) as string[])
+// ── 依存と書き出しの見張り ────────────────────────────────────────────────
+
+const VIEW_DIR = fileURLToPath(new URL('..', import.meta.url))   // packages/view-3d/
+const REPO_DIR = resolve(VIEW_DIR, '../..')
+
+function sourcesOf(dir: string): string[] {
+  return (readdirSync(join(VIEW_DIR, dir), { recursive: true }) as string[])
     .filter(f => /\.tsx?$/.test(f))
-    .map(f => ({ f, text: readFileSync(`${srcDir}/${f}`, 'utf-8') }))
+    .map(f => join(dir, f))
+}
 
-  it('view-3d は engine-js・@redstone/sim・board を import しない', () => {
-    const bad = files.filter(({ text }) => /from\s+'(@redstone-engine\/(engine-js|board)|@redstone\/)/.test(text)).map(x => x.f)
+interface Specifier {
+  readonly spec: string
+  readonly typeOnly: boolean
+  readonly line: number
+}
+
+/**
+ * ファイルの中の、モジュールを指す所を全部集める (構文木で見るので、引用符の種類・改行・注を問わない)。
+ * import・export … from・import type・`import(…)`・`require(…)`・型の中の `import('…')`。指定子が文字列でなければ `<式>`
+ */
+function specifiersOf(file: string, text: string): Specifier[] {
+  const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
+  const out: Specifier[] = []
+  const at = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1
+  const literal = (n: ts.Node | undefined) => (n && ts.isStringLiteralLike(n) ? n.text : '<式>')
+  const visit = (n: ts.Node): void => {
+    if (ts.isImportDeclaration(n)) {
+      const c = n.importClause
+      const named = c?.namedBindings && ts.isNamedImports(c.namedBindings) ? c.namedBindings.elements : null
+      const typeOnly = !!c && (c.isTypeOnly || (!c.name && !!named && named.length > 0 && named.every(e => e.isTypeOnly)))
+      out.push({ spec: literal(n.moduleSpecifier), typeOnly, line: at(n) })
+    } else if (ts.isExportDeclaration(n) && n.moduleSpecifier) {
+      const named = n.exportClause && ts.isNamedExports(n.exportClause) ? n.exportClause.elements : null
+      const typeOnly = n.isTypeOnly || (!!named && named.length > 0 && named.every(e => e.isTypeOnly))
+      out.push({ spec: literal(n.moduleSpecifier), typeOnly, line: at(n) })
+    } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) {
+      out.push({ spec: literal(n.moduleReference.expression), typeOnly: n.isTypeOnly, line: at(n) })
+    } else if (ts.isCallExpression(n)
+      && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === 'require'))) {
+      out.push({ spec: literal(n.arguments[0]), typeOnly: false, line: at(n) })
+    } else if (ts.isImportTypeNode(n) && ts.isLiteralTypeNode(n.argument)) {
+      out.push({ spec: literal(n.argument.literal), typeOnly: true, line: at(n) })
+    }
+    ts.forEachChild(n, visit)
+  }
+  visit(sf)
+  return out
+}
+
+/** パッケージの名前 (`@scope/name` か、最初の区切りまで) */
+function packageOf(spec: string): string {
+  const parts = spec.split('/')
+  return spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]
+}
+
+/** src の (試験でない) ファイルが使ってよいパッケージ */
+const SRC_PACKAGES = new Set(['react', 'deepslate', 'gl-matrix'])
+/** 試験が使ってよい物 (src の物に足す) */
+const TEST_PACKAGES = new Set(['vitest', 'typescript'])
+/** 型だけ依ってよいパッケージ (docs/architecture.md §1: board → view-3d) */
+const TYPE_ONLY_PACKAGES = new Set(['@redstone-engine/board'])
+
+/** 依存の決まりに外れた所 (file は packages/view-3d/ からの道筋) */
+function dependencyHits(file: string, text: string): string[] {
+  const isTest = /\.test\.tsx?$/.test(file) || file.startsWith(`test${sep}`) || file.startsWith('test/')
+  const hits: string[] = []
+  for (const { spec, typeOnly, line } of specifiersOf(file, text)) {
+    const where = `${file}:${line} ${spec}`
+    if (spec === '<式>') {
+      hits.push(`${where} (指定子が文字列でない。確かめられない)`)
+    } else if (spec.startsWith('.')) {
+      const target = resolve(VIEW_DIR, dirname(file), spec)
+      const rel = relative(VIEW_DIR, target)
+      if (rel.startsWith('..') || resolve(target) === resolve(VIEW_DIR, '..')) hits.push(`${where} (view-3d の外を指す相対パス)`)
+    } else if (spec.startsWith('node:')) {
+      if (!isTest) hits.push(`${where} (src に Node の物を入れない)`)
+    } else {
+      const pkg = packageOf(spec)
+      if (TYPE_ONLY_PACKAGES.has(pkg)) {
+        if (!typeOnly) hits.push(`${where} (board は型だけ)`)
+      } else if (!SRC_PACKAGES.has(pkg) && !(isTest && TEST_PACKAGES.has(pkg))) {
+        hits.push(`${where} (許していないパッケージ。engine-js・@redstone/sim には依らない)`)
+      }
+    }
+  }
+  return hits
+}
+
+/** index.ts が書き出す名前 (`export *` は名前が決まらないので、それ自体を外れとして返す) */
+function exportedNamesOf(text: string): { names: string[]; star: number } {
+  const sf = ts.createSourceFile('index.ts', text, ts.ScriptTarget.Latest, true)
+  const names: string[] = []
+  let star = 0
+  for (const st of sf.statements) {
+    if (ts.isExportDeclaration(st)) {
+      if (!st.exportClause || ts.isNamespaceExport(st.exportClause)) star++
+      else for (const e of st.exportClause.elements) names.push(e.name.text)
+    } else if (ts.canHaveModifiers(st) && ts.getModifiers(st)?.some(m => m.kind === ts.SyntaxKind.ExportKeyword)) {
+      names.push((st as ts.DeclarationStatement).name?.getText(sf) ?? '<名前なし>')
+    }
+  }
+  return { names: names.sort(), star }
+}
+
+/** 窓口として書き出す名前 (足す・外す時はここも直す) */
+const PUBLIC_NAMES = [
+  'ApplyResult', 'AssetState', 'Board', 'BoardBounds', 'CameraInput', 'CameraState', 'CellChange',
+  'IsometricView', 'IsometricViewHandle', 'IsometricViewProps', 'MCMETA_BASE', 'PICK_PASS_THROUGH',
+  'PickRole', 'PickRoleFn', 'Pos3', 'VIEWER_FAR', 'VIEWER_FOV_DEG', 'VIEWER_NEAR',
+  'cellKey', 'fitDistance', 'maxZoomOut', 'normalizeState', 'pickRoleFrom',
+].sort()
+
+/**
+ * 型検査器で、モジュールが書き出す物の型をたどり、deepslate で宣言された型が出てこないかを見る。
+ * props の中・関数の引数と戻り値・型の引数まで降りる。React と lib の型の中へは降りない (型の引数は見る)
+ */
+function deepslateLeaksOf(program: ts.Program, file: string): string[] {
+  const checker = program.getTypeChecker()
+  const sf = program.getSourceFile(file)
+  if (!sf) throw new Error(`読めない: ${file}`)
+  const mod = checker.getSymbolAtLocation(sf)
+  if (!mod) throw new Error(`モジュールでない: ${file}`)
+  const inside = (s: ts.Symbol | undefined, re: RegExp) => !!s?.declarations?.some(d => re.test(d.getSourceFile().fileName))
+  const DEEPSLATE = /[\\/]node_modules[\\/]deepslate[\\/]/
+  const leaks = new Set<string>()
+  const seen = new Set<ts.Type>()
+  const walk = (t: ts.Type, path: string): void => {
+    if (seen.has(t)) return
+    seen.add(t)
+    const sym = t.aliasSymbol ?? t.getSymbol()
+    if (inside(t.aliasSymbol, DEEPSLATE) || inside(t.getSymbol(), DEEPSLATE)) {
+      leaks.add(`${path}: ${checker.typeToString(t)}`)
+      return
+    }
+    for (const a of t.aliasTypeArguments ?? []) walk(a, `${path}<>`)
+    if ((t.flags & ts.TypeFlags.Object) && ((t as ts.ObjectType).objectFlags & ts.ObjectFlags.Reference)) {
+      for (const a of checker.getTypeArguments(t as ts.TypeReference)) walk(a, `${path}<>`)
+    }
+    if (t.isUnionOrIntersection()) for (const u of t.types) walk(u, path)
+    const decls = sym?.declarations ?? []
+    if (decls.length > 0 && decls.every(d => /[\\/]node_modules[\\/]/.test(d.getSourceFile().fileName))) return
+    for (const p of checker.getPropertiesOfType(t)) {
+      const d = p.valueDeclaration ?? p.declarations?.[0]
+      if (d) walk(checker.getTypeOfSymbolAtLocation(p, d), `${path}.${p.name}`)
+    }
+    for (const sig of [...t.getCallSignatures(), ...t.getConstructSignatures()]) {
+      for (const prm of sig.getParameters()) {
+        const d = prm.valueDeclaration ?? prm.declarations?.[0]
+        if (d) walk(checker.getTypeOfSymbolAtLocation(prm, d), `${path}(${prm.name})`)
+      }
+      walk(sig.getReturnType(), `${path}()`)
+    }
+  }
+  for (const exported of checker.getExportsOfModule(mod)) {
+    const s = exported.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(exported) : exported
+    if (inside(s, DEEPSLATE)) leaks.add(`${exported.name}: deepslate の物そのもの`)
+    const d = s.valueDeclaration ?? s.declarations?.[0]
+    if ((s.flags & ts.SymbolFlags.Value) && d) walk(checker.getTypeOfSymbolAtLocation(s, d), exported.name)
+    if (s.flags & ts.SymbolFlags.Type) walk(checker.getDeclaredTypeOfSymbol(s), exported.name)
+  }
+  return [...leaks].sort()
+}
+
+describe('依存の向き (docs/architecture.md §1・§2)', () => {
+  const files = [...sourcesOf('src'), ...sourcesOf('test')].map(f => ({ f, text: readFileSync(join(VIEW_DIR, f), 'utf-8') }))
+
+  it('engine-js・@redstone/sim に依らない。board は型だけ。相対パスで view-3d の外へ出ない。src に Node の物を入れない', () => {
     expect(files.length).toBeGreaterThan(10)
-    expect(bad).toEqual([])
+    expect(files.flatMap(({ f, text }) => dependencyHits(f, text))).toEqual([])
   })
 
-  it('窓口の型 (types.ts) は何も import せず、index.ts は deepslate の物を書き出さない', () => {
-    const types = files.find(x => x.f === 'types.ts')?.text ?? ''
-    const index = files.find(x => x.f === 'index.ts')?.text ?? ''
-    expect(types).not.toMatch(/^import /m)
-    expect(index).not.toMatch(/from\s+'deepslate/)
-    expect(index).not.toMatch(/BoardModel|StructureProvider/)
+  it('見張りは、引用符の種類・相対パス・動的 import・export from・require・型の import を拾う', () => {
+    // 見張りの試験の字面が、この試験ファイル自身を見張りに引っかけないよう、IMPORT を置き換えて作る
+    const src = (t: string) => t.replace(/IMPORT/g, 'import')
+    const hits = (t: string, file = join('src', 'x.ts')) => dependencyHits(file, src(t))
+    expect(hits('IMPORT { Engine } from "@redstone-engine/engine-js"')).toHaveLength(1)
+    expect(hits("IMPORT type { BlockState } from '@redstone/sim'")).toHaveLength(1)
+    expect(hits('IMPORT { x } from "../../engine-js/src/index"')).toHaveLength(1)
+    expect(hits("IMPORT { x } from '../src/world'", join('test', 'a.test.ts'))).toEqual([])
+    expect(hits("IMPORT { x } from '../../board/src/types'", join('test', 'a.test.ts'))).toHaveLength(1)
+    expect(hits("const m = await IMPORT('@redstone-engine/engine-js')")).toHaveLength(1)
+    expect(hits('const m = await IMPORT(name)')).toHaveLength(1)
+    expect(hits("export * from '@redstone/sim'")).toHaveLength(1)
+    expect(hits("const m = require('@redstone-engine/engine-js')")).toHaveLength(1)
+    expect(hits("let t: IMPORT('@redstone/sim').BlockState")).toHaveLength(1)
+    expect(hits("IMPORT {\n  readFile,\n} from 'node:fs/promises'")).toHaveLength(1)
+    expect(hits("IMPORT { readFile } from 'node:fs'", join('src', 'a.test.ts'))).toEqual([])
+    // board は型だけ
+    expect(hits("IMPORT type { Board } from '@redstone-engine/board'")).toEqual([])
+    expect(hits("IMPORT { type Board } from '@redstone-engine/board'")).toEqual([])
+    expect(hits("IMPORT { Board } from '@redstone-engine/board'")).toHaveLength(1)
+    // 注の中の字面は拾わない
+    expect(hits("// IMPORT { Engine } from '@redstone-engine/engine-js'\nconst a = 1")).toEqual([])
   })
+
+  it('index.ts は export * を使わず、書き出す名前は決めた一覧のとおり', () => {
+    const index = files.find(x => x.f === join('src', 'index.ts'))?.text ?? ''
+    const { names, star } = exportedNamesOf(index)
+    expect(star).toBe(0)
+    expect(names).toEqual(PUBLIC_NAMES)
+    expect(exportedNamesOf("export * from './x'\nexport * as y from './y'").star).toBe(2)
+    expect(files.find(x => x.f === join('src', 'types.ts'))?.text).not.toMatch(/^import /m)
+  })
+
+  it('書き出しの型 (props・命令の口・関数の引数と戻り値) に deepslate の型が出ない (型検査器でたどる)', () => {
+    const cfgPath = join(REPO_DIR, 'tsconfig.json')
+    const cfg = ts.parseJsonConfigFileContent(ts.readConfigFile(cfgPath, ts.sys.readFile).config, ts.sys, REPO_DIR)
+    const index = join(VIEW_DIR, 'src', 'index.ts')
+    const inner = join(VIEW_DIR, 'src', 'board-to-structure.ts')
+    const program = ts.createProgram([index, inner], cfg.options)
+    expect(deepslateLeaksOf(program, index)).toEqual([])
+    // 見張りが効くこと: 中の物 (new BoardModel().structure・Redraw の chunks) は deepslate の型を出している
+    const inside = deepslateLeaksOf(program, inner)
+    expect(inside).toContain('BoardModel().structure: StructureProvider')
+    expect(inside).toContain('Redraw.chunks<>: BlockPos')
+  }, 60_000)
 })

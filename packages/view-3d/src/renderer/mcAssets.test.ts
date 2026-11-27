@@ -94,8 +94,10 @@ function stubImageDecoding(opts: { broken?: boolean } = {}) {
   }))
 }
 
+/** バニラの取得先 (mcmeta と PrismarineJS を、raw か jsDelivr から) */
+const VANILLA = /^https:\/\/(raw\.githubusercontent\.com\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)\/|cdn\.jsdelivr\.net\/gh\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)@)/
+
 describe('既定はパック無し (#11)', () => {
-  const VANILLA = /^https:\/\/(raw\.githubusercontent\.com\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)\/|cdn\.jsdelivr\.net\/gh\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)@)/
 
   it('既定で fetch するのは mcmeta と PrismarineJS だけ (bundle・パックの JSON・パックのテクスチャを取りに行かない)', async () => {
     stubImageDecoding()
@@ -131,6 +133,52 @@ describe('既定はパック無し (#11)', () => {
       `${MCMETA_RAW}entity/chest/trapped.png`,
       BUNDLE_URL, `${PACK_TEX}entity/chest/trapped.png`,
     ])
+  })
+})
+
+describe('buildResources の取り方 (#11)', () => {
+  /** 画像を描く所 (canvas) の最小の代役。アトラスを組むのに使う */
+  function stubCanvas() {
+    const ctx = {
+      imageSmoothingEnabled: true,
+      fillStyle: '',
+      fillRect() {},
+      drawImage() {},
+      getImageData: (_x: number, _y: number, w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    }
+    vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => ctx }) })
+  }
+
+  /** blockstates と models の JSON (手で書いた最小の物) と、テクスチャ。パックの物は SPA の 200 + index.html */
+  function vanillaAndPack(): Handler {
+    return (url) => {
+      if (url.endsWith('/blocks_states.json')) return json({ stone: { variants: { '': { model: 'block/stone' } } } })
+      if (url.endsWith('/blocks_models.json')) return json({ stone: { textures: { all: 'block/stone' }, elements: [] } })
+      if (url === BUNDLE_URL) return json(BUNDLE)
+      if (url.startsWith('/resourcepack/')) return spaFallback()
+      return png()
+    }
+  }
+
+  it('buildResources も、既定では mcmeta と PrismarineJS だけを取る (パックの bundle・JSON・テクスチャへ行かない)', async () => {
+    stubImageDecoding()
+    stubCanvas()
+    const calls = stubFetch(vanillaAndPack())
+    const { buildResources } = await import('./buildResources')
+    const built = await buildResources(['minecraft:stone', 'stone'])
+    expect(built.assets).toBe('full')
+    expect(calls).toContain(`${PRISMARINE_RAW}blocks_states.json`)
+    expect(calls).toContain(`${MCMETA_RAW}block/stone.png`)
+    expect(calls.filter(u => !VANILLA.test(u)), 'パックか、知らない所へ取りに行っている').toEqual([])
+  })
+
+  it('buildResources にパックを渡した時だけ、bundle とパックを試す', async () => {
+    stubImageDecoding()
+    stubCanvas()
+    const calls = stubFetch(vanillaAndPack())
+    const { buildResources } = await import('./buildResources')
+    await buildResources(['stone'], PACK)
+    expect(calls).toContain(BUNDLE_URL)
   })
 })
 
@@ -306,7 +354,6 @@ describe('blocks_states / blocks_models (redstone-sim#395)', () => {
 describe('リソースパックの基点 URL (redstone-sim#434)', () => {
   const OTHER = 'https://example.test/kit/pack'
 
-
   it('基点を渡すと bundle・JSON・テクスチャをその下から取る (末尾の / は無視)', async () => {
     const { textures: _omit, ...old } = BUNDLE
     const calls = stubFetch(url => {
@@ -319,7 +366,7 @@ describe('リソースパックの基点 URL (redstone-sim#434)', () => {
     expect(calls).toEqual([`${OTHER}/bundle.json`, `${OTHER}/assets/minecraft/textures/block/stone.png`])
   })
 
-  it('基点ごとに別々に覚える (既定の基点で覚えた物を別の基点に使わない)', async () => {
+  it('基点ごとに別々に覚える (ある基点で覚えた物を別の基点に使わない)', async () => {
     stubImageDecoding()
     const calls = stubFetch(url => {
       if (url === BUNDLE_URL) return json(BUNDLE)
