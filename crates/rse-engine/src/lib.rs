@@ -79,16 +79,15 @@ impl Rules for Engine {
         other_pos: Pos,
         other: StateId,
     ) -> StateId {
-        // 渡された相手の状態は、今はどの素子にも渡していない。素子は世界から読む。
-        // - ダストの水平と上: 自分で周りを読むので、渡された状態は判定に使わない (V06 §4.7 の表)。
-        // - ダストの下 (支えの判定): UNVERIFIED。渡された状態で見るのか、世界の今の真下で見るのかは
-        //   メモに無い (wire.rs の update_shape の下の腕)。メモが決まったら、ここで渡すかを直す。
-        // - レバー: 支えの面を世界から読む (V09 §4.1)。
+        // 運ばれた相手の状態 (積んだ時点の物。V04 §5.5) を使うのは、ダストの下の腕だけ。
+        // - ダストの下 (支えの判定): 運ばれた状態で判定し、世界の今の真下は読まない (V06 §4.6)。
+        // - ダストの水平と上: 自分で周りを読むので、運ばれた状態は判定に使わない (V06 §4.6・§4.7)。
+        // - レバー: 運ばれた状態は使わず、世界の今の支えを読む (V09 §4.1)。
         let _ = (pos, dir, other_pos, other);
         match state.behavior() {
             Behavior::Inert => state,
             #[cfg(feature = "redstone")]
-            Behavior::Wire => wire::update_shape(lv, pos, state, dir),
+            Behavior::Wire => wire::update_shape(lv, pos, state, dir, other),
             #[cfg(feature = "redstone")]
             Behavior::Lever => lever::update_shape(lv, pos, state, dir),
             // ランプは形を持たない。受電は SU では決まらない (V11 §5.2)。
@@ -318,6 +317,33 @@ mod tests {
         // 信号は 0。信号源の印は表の値のまま。
         assert_eq!(world.signal(lever, Dir::West), 0);
         assert!(world.is_signal_source(world.get_state(wire)));
+    }
+
+    // 振り分けは、運ばれた相手の状態をダストにだけ渡す。
+    // ダストの下の腕は運ばれた状態で判定し (V06 §4.6)、レバーは世界の今の支えで判定する (V09 §4.1)。
+    #[cfg(feature = "redstone")]
+    #[test]
+    fn carried_state_reaches_the_wire_but_not_the_lever() {
+        let stone = block::STONE.default_state();
+        let down = |world: &mut World, pos: Pos, carried: StateId| {
+            let state = world.get_state(pos);
+            Engine::update_shape(world, pos, state, Dir::Down, pos.offset(Dir::Down), carried)
+        };
+
+        // 世界の真下は石のまま。支えない状態 (空気) が運ばれた時。
+        let (mut world, lever, wire, _) = lever_wire_lamp();
+        let (lever_state, wire_state) = (world.get_state(lever), world.get_state(wire));
+        assert_eq!(down(&mut world, wire, StateId::AIR), StateId::AIR);
+        assert_eq!(down(&mut world, lever, StateId::AIR), lever_state);
+        assert_eq!(down(&mut world, wire, stone), wire_state);
+
+        // 世界の真下は空気。支える状態 (石) が運ばれた時。
+        let (mut world, lever, wire, _) = lever_wire_lamp();
+        world.set_state_raw(wire.offset(Dir::Down), StateId::AIR);
+        world.set_state_raw(lever.offset(Dir::Down), StateId::AIR);
+        assert_eq!(down(&mut world, wire, stone), wire_state);
+        assert_eq!(down(&mut world, lever, stone), StateId::AIR);
+        assert!(world.take_status().is_ok());
     }
 
     // 材料 (石・空気) は、どちらの組み立てでも何も立てない。

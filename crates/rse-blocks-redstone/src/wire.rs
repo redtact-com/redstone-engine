@@ -9,11 +9,10 @@
 //! 実験の評価器 (V06 §4.13) と Orientation は持たない。既定の世界では使わない (V06 §4.17)。
 //! アイテムのドロップも持たない。
 //!
-//! UNVERIFIED: ダストが自分で配る NC の送り元のブロック。V06 が「送り主はダスト」と書いているのは、
-//! 評価器の 7 起点 (§4.12 の手順 5) と右クリックの書き込み (§4.16 の手順 5) だけである。
-//! 設置の上下と角の確認 (§4.14)・除去の 6 起点 (§4.15)・右クリックの導体の先 (§4.16 の手順 6) は、
-//! 「素子が自分で配る NC の送り元は配った本人」(V11 §3.1 の要点 1) に合わせてダストにした。
-//! 今の 5 種の受け手は送り元を読まないので、結果には効かない。
+//! ダストが自分で配る NC の送り元は、どれもダストである (V06 §4.11 の「ダストが出す近隣更新の送り主」)。
+//! 評価器の 7 起点・設置の上下・角の確認・除去の 6 起点・右クリックの導体の先のどれも、
+//! 起点がダストでないマスでも、送り元は起点のブロックではなくダストにする。
+//! 除去では世界のそのマスはもう別のブロックだが、送り元は消えたダストである。
 
 use crate::RedstoneRules;
 use rse_core::state::block;
@@ -109,11 +108,20 @@ fn is_wire(state: StateId) -> bool {
     state.behavior() == Behavior::Wire
 }
 
-/// 支え (V06 §4.5・V05 §4.7.5。RedstoneWireBlock.canSurvive)。
-/// 真下の上面が FULL で支えるか、真下がホッパーなら残れる。
-pub fn can_survive<R: RedstoneRules>(lv: &Level<R>, pos: Pos) -> bool {
-    let below = lv.get_state(pos.offset(Dir::Down));
+/// その状態が、上に載るダストの支えになるか (V06 §4.5・V05 §4.7.5。RedstoneWireBlock.canSurviveOn)。
+/// 上面が FULL で支えるか、ホッパーなら支えになる。世界を読まない。
+///
+/// 動的形状のブロック (面の形を世界と合わせて決める物。V06 §4.6・V05 §4.7.4) は、まだ状態表に無い。
+/// 入れる時は、真下の座標も受けて面の形を求める。
+#[inline]
+pub fn can_survive_on(below: StateId) -> bool {
     below.is_face_sturdy(Dir::Up, SupportType::Full) || below.behavior() == Behavior::Hopper
+}
+
+/// 支え (V06 §4.5。RedstoneWireBlock.canSurvive)。世界の今の真下で判定する。
+/// 近隣更新の経路が使う (V06 §4.11 の手順 2・3)。下からの形状更新は使わない ([`update_shape`])。
+pub fn can_survive<R: RedstoneRules>(lv: &Level<R>, pos: Pos) -> bool {
+    can_survive_on(lv.get_state(pos.offset(Dir::Down)))
 }
 
 /// 接続先になるか (V06 §4.1。BlockBehaviour.shouldRedstoneWireConnectTo)。
@@ -205,8 +213,11 @@ pub fn placement_state<R: RedstoneRules>(lv: &Level<R>, pos: Pos) -> StateId {
 }
 
 /// 形状更新 (V06 §4.6。RedstoneWireBlock.updateShape)。`dir` はダストから、変わった隣へ向かう方向。
+/// `other` は形状更新が運んできた隣の状態で、積んだ時点の物である。今の世界の状態とは限らない (V04 §5.5)。
 ///
-/// - 下: 下が支えにならなければ空気を返す (骨格が壊す)。
+/// - 下: 運ばれた状態が支えにならなければ空気を返す (骨格が壊す)。世界の今の真下は読まない
+///   (V06 §4.6 の「下の段で見る状態」)。近隣更新の経路は逆で、世界の今の真下を読む ([`can_survive`])。
+///   2 つが食い違うのは、積んだ更新が走る前に真下がまた書き換わった時だけである。
 /// - 上: 持っている形を入力にして、全部を計算し直す (点の保持が効く)。
 /// - 水平 d: d の生の接続 s を求める。「接続か」が持っている形と同じで、持っている形が十字でなければ、
 ///   d だけを s に置き換える。それ以外は、点でない入力で全部を計算し直す。
@@ -218,14 +229,11 @@ pub fn update_shape<R: RedstoneRules>(
     pos: Pos,
     state: StateId,
     dir: Dir,
+    other: StateId,
 ) -> StateId {
     match (dir, slot(dir)) {
-        // UNVERIFIED: 支えを「世界の今の真下」で判定している。V06 §4.6 は、下から届いた形状更新で
-        // どの状態 (渡された相手の状態か、世界の今の真下か) を見て判定するかを書いていない。
-        // 形状更新が運ぶ相手の状態は積んだ時点の物で、今の状態とは限らない (V04 §5.5)。
-        // 今の 5 種では、2 つが食い違う経路が無い。
         (Dir::Down, _) => {
-            if can_survive(lv, pos) {
+            if can_survive_on(other) {
                 state
             } else {
                 StateId::AIR
@@ -517,7 +525,7 @@ pub fn use_block<R: RedstoneRules>(lv: &mut Level<R>, pos: Pos, state: StateId) 
     for (i, dir) in Dir::HORIZONTAL.into_iter().enumerate() {
         let near = pos.offset(dir);
         if held.0[i].is_connected() != next.0[i].is_connected() && lv.is_conductor(near) {
-            // 送り元は冒頭の UNVERIFIED のとおり。
+            // 送り元は、起点の導体ではなくダスト (V06 §4.11)。
             lv.update_neighbors_at_except(near, block::REDSTONE_WIRE, dir.opposite(), None);
         }
     }
@@ -854,6 +862,72 @@ mod tests {
         assert!(!can_survive(&lv, p(0, 2, 0)));
         put(&mut lv, p(0, 1, 0), parse(LEVER_OFF));
         assert!(!can_survive(&lv, p(0, 2, 0)));
+    }
+
+    // 下からの形状更新は、運ばれた状態で支えを判定する。世界の今の真下は読まない (V06 §4.6)。
+    // 2 つが食い違うのは、積んだ更新が走る前に真下がまた書き換わった時 (V04 §5.5)。
+    #[test]
+    fn shape_update_from_below_uses_the_carried_state() {
+        const LINE: &str = "redstone_wire[east=side,north=none,power=0,south=none,west=side]";
+        let (wire, below) = (p(1, 1, 0), p(1, 0, 0));
+        let line = parse(LINE);
+
+        // 真下を「石 → 空気 → 石」と続けて書いた時の 1 件目。世界は石に戻っているが、運ばれたのは空気。
+        let mut lv = level();
+        put(&mut lv, below, stone());
+        put(&mut lv, wire, line);
+        assert!(can_survive(&lv, wire));
+        assert_eq!(
+            update_shape(&lv, wire, line, Dir::Down, StateId::AIR),
+            StateId::AIR,
+            "支えない状態が運ばれたら、世界の真下が石でも消える"
+        );
+        // 支えにならない物はどれも同じ (ダスト・レバーの上には残れない。V05 §4.7.5)。
+        assert_eq!(
+            update_shape(&lv, wire, line, Dir::Down, parse(LEVER_OFF)),
+            StateId::AIR
+        );
+
+        // 真下を「石 → 空気」と続けて書いた時の 1 件目。世界はもう空気だが、運ばれたのは石。
+        let mut lv = level();
+        put(&mut lv, wire, line);
+        assert!(!can_survive(&lv, wire));
+        assert_eq!(
+            update_shape(&lv, wire, line, Dir::Down, stone()),
+            line,
+            "支える状態が運ばれたら、世界の真下が空気でも残る"
+        );
+        // 2 件目 (空気) で消える。
+        assert_eq!(
+            update_shape(&lv, wire, line, Dir::Down, StateId::AIR),
+            StateId::AIR
+        );
+
+        // 下の腕は形に触れない。持っている形が実情とずれていても、そのまま返す。
+        let mut lv = level();
+        put(&mut lv, below, stone());
+        put(&mut lv, wire, line);
+        put(&mut lv, p(1, 1, 1), block::REDSTONE_WIRE.default_state());
+        assert_eq!(update_shape(&lv, wire, line, Dir::Down, stone()), line);
+    }
+
+    // 骨格を通した時も、書いた状態が運ばれて届く。1 回の書き込みでは、運ばれた状態と世界は同じ (V06 §4.6)。
+    #[test]
+    fn shape_update_from_below_through_the_queue() {
+        // フラグ 2 だけ (NC を出さない) で真下を別の支えに書き換える。形状更新の経路だけが走り、残る。
+        let mut lv = level();
+        floor(&mut lv, 0..=2, 0..=0);
+        place_wire(&mut lv, p(1, 1, 0));
+        let before = at(&lv, p(1, 1, 0));
+        lv.set_block(
+            p(1, 0, 0),
+            parse("redstone_lamp[lit=false]"),
+            UpdateFlags::CLIENTS,
+        );
+        assert_eq!(at(&lv, p(1, 1, 0)), before);
+        // 支えにならない物 (レバー) に書き換えると、形状更新の経路で消える。
+        lv.set_block(p(1, 0, 0), parse(LEVER_OFF), UpdateFlags::CLIENTS);
+        assert_eq!(at(&lv, p(1, 1, 0)), "air");
     }
 
     // 7 起点の順 (V06 §4.12.2 の表)。座標から計算で求める。原点の近くは組の規則から外れる。

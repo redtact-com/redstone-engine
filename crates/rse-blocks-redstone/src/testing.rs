@@ -49,10 +49,10 @@ impl Rules for Bench {
         state: StateId,
         dir: Dir,
         _other_pos: Pos,
-        _other: StateId,
+        other: StateId,
     ) -> StateId {
         match state.behavior() {
-            Behavior::Wire => wire::update_shape(lv, pos, state, dir),
+            Behavior::Wire => wire::update_shape(lv, pos, state, dir, other),
             Behavior::Lever => lever::update_shape(lv, pos, state, dir),
             _ => state,
         }
