@@ -7,8 +7,9 @@
 //! - 値は実機の値の並びで書く。真偽は true → false、整数は昇順、face は floor → wall → ceiling、
 //!   水平の向きは north → south → west → east (水平の反復の順 北・東・南・西 とは違う)。
 //! - 既定の状態は、値の添字の列で書く (V05 §3.4 の表)。
+//! - 面の支えは V05 §4.7.5 の表のとおり。石とランプは 6 面 × 3 種とも支え、空気・レバー・ダストは支えない。
 
-use crate::state::{Behavior, BlockDef, PropDef, flag};
+use crate::state::{Behavior, BlockDef, PropDef, flag, support};
 
 const BOOL: &[&str] = &["true", "false"];
 /// ダストの接続 (V06 §3.1)。
@@ -31,6 +32,7 @@ pub const BLOCKS: [BlockDef; 5] = [
         default: &[],
         behavior: Behavior::Inert,
         flags: flag::AIR | flag::REPLACEABLE,
+        support: support::NONE,
     },
     // 石。導体の代表。
     BlockDef {
@@ -39,6 +41,7 @@ pub const BLOCKS: [BlockDef; 5] = [
         default: &[],
         behavior: Behavior::Inert,
         flags: FULL_CUBE,
+        support: support::ALL,
     },
     // レバー。24 状態。既定は wall・north・false (V05 §3.4)。
     // 信号源 (V05 §4.3)。当たり判定が無いので非導体で、legacy solid も偽 (V05 §4.7.2)。
@@ -61,6 +64,7 @@ pub const BLOCKS: [BlockDef; 5] = [
         default: &[1, 0, 1],
         behavior: Behavior::Lever,
         flags: flag::SIGNAL_SOURCE,
+        support: support::NONE,
     },
     // ダスト。1296 状態。既定は四方 none・power 0 (V05 §3.3 の例・V06 §3.1)。
     // 信号源の印は表では真。評価中だけ偽になる分は Rules.is_signal_source が受け持つ (V05 §7.2)。
@@ -91,6 +95,7 @@ pub const BLOCKS: [BlockDef; 5] = [
         default: &[2, 2, 0, 2, 2],
         behavior: Behavior::Wire,
         flags: flag::SIGNAL_SOURCE,
+        support: support::NONE,
     },
     // ランプ。2 状態。既定は lit=false (V05 §3.4)。導体の上書きの一覧 (V05 §4.4.2) に無いので導体。
     BlockDef {
@@ -102,5 +107,6 @@ pub const BLOCKS: [BlockDef; 5] = [
         default: &[1],
         behavior: Behavior::Lamp,
         flags: FULL_CUBE,
+        support: support::ALL,
     },
 ];

@@ -28,6 +28,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: テスト
         run: cargo test --workspace
+      - name: 族を外した組み立て (族の素子が UNIMPLEMENTED を返す)
+        run: cargo test -p rse-engine --no-default-features
       - name: wasm のビルド
         run: cargo build -p rse-wasm --target wasm32-unknown-unknown --release
       - name: 大きさの報告 (合否にしない)
