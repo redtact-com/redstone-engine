@@ -4,11 +4,31 @@
 
 use super::*;
 use crate::registry;
-use crate::scratch::testing::{peek_cells, peek_u32, poke};
 use rse_engine::rse_core::state::STATE_COUNT;
 use rse_engine::{Config, Input, InputSection, Pos, StateId, Status, new_world};
 
 const A: u32 = 2;
+
+/// `ptr` に `data` を書く (JS が作業領域に書くのと同じ)。作業領域の外なら panic (テストの誤り)。
+fn poke(ptr: *mut u8, data: &[u8]) {
+    assert!(
+        registry::with(|r| r.scratch_mut().poke(ptr.addr(), data)),
+        "作業領域の外"
+    );
+}
+
+/// `ptr` の u32 を読む。作業領域の外なら panic。
+fn peek_u32(ptr: *const u8) -> u32 {
+    registry::with(|r| {
+        let bytes = r.scratch_mut().bytes(ptr.addr(), 4).expect("作業領域の外");
+        u32::from_le_bytes(bytes.try_into().unwrap())
+    })
+}
+
+/// `rse_changes` が返した番地と件数を、その世界の変化の列と突き合わせてから写す。
+fn peek_cells(handle: u32, ptr: *const CellRec, n: usize) -> Vec<CellRec> {
+    registry::with(|r| r.changes_at(handle, ptr, n)).expect("変化の列でない番地か件数")
+}
 
 /// JS の resolve と同じ: 作業領域の先頭 4 バイトを out、その後ろを名前にする。
 fn resolve(name: &str) -> Result<u32, u32> {
@@ -64,7 +84,7 @@ fn changes(handle: u32) -> Option<Vec<CellRec>> {
         assert_eq!(n, 0);
         None
     } else {
-        Some(peek_cells(ptr, n))
+        Some(peek_cells(handle, ptr, n))
     }
 }
 
@@ -290,11 +310,50 @@ fn load_refuses_bad_cells_before_placing_any() {
     assert_eq!(load(h, &[ok], load_mode::REBUILD), Status::UNIMPLEMENTED.0);
     assert_eq!(load(h, &[ok], 2), status::ARGUMENT);
     assert_eq!(changes(h).unwrap(), []);
-    // 格子の枠 (離れすぎた 2 点) は置いてみるまで分からない。前のマスは置いたまま残る。
+    // 格子の枠 (離れすぎた 2 点) は置いてみるまで分からない。置けなかったら、前に置いたマスを戻す
+    // (全部か無しか)。前からあったマスも、同じ列で書き換えた分は前の状態に戻る。
+    let lamp = CellRec {
+        state: id("redstone_lamp"),
+        ..ok
+    };
+    assert_eq!(load(h, &[lamp], 0), 0);
+    changes(h);
     let far = CellRec { x: 16 * 256, ..ok };
-    assert_eq!(load(h, &[ok, far], 0), status::OUT_OF_WORLD);
-    assert_eq!(changes(h).unwrap(), [ok]);
+    let next = CellRec { x: 1, ..ok };
+    assert_eq!(load(h, &[ok, next, ok, far], 0), status::OUT_OF_WORLD);
+    assert_eq!(changes(h).unwrap(), []);
+    let ok_far = CellRec { x: 16 * 255, ..ok };
+    assert_eq!(load(h, &[next, ok_far], 0), 0);
+    assert_eq!(changes(h).unwrap(), [next, ok_far]);
     assert_eq!(rse_world_free(h), 0);
+}
+
+// 同じ席を使い回して世代が最後 (0xFFFF) まで来たら、その席は退かせる。古いハンドルはどれも当たらない。
+#[test]
+fn slots_retire_instead_of_wrapping_the_generation() {
+    let first = rse_world_new();
+    let index = first & 0xFFFF;
+    let mut last = first;
+    let mut count = 0;
+    loop {
+        assert_eq!(rse_world_free(last), 0);
+        let next = rse_world_new();
+        count += 1;
+        if next & 0xFFFF != index {
+            // 前の席は退いた。最後に捨てた世界の世代は 0xFFFF。
+            assert_eq!(last >> 16, 0xFFFF);
+            assert_eq!(rse_world_free(next), 0);
+            break;
+        }
+        assert_eq!(next >> 16, (last >> 16) + 1);
+        last = next;
+        assert!(count <= 0x10000, "世代が一周した");
+    }
+    // 退いた席の古いハンドルは、どれも HANDLE を返す。世代 0 の形のハンドルも当たらない。
+    for stale in [first, last, index] {
+        assert_eq!(rse_step(stale, 1), status::HANDLE);
+        assert_eq!(rse_world_free(stale), status::HANDLE);
+    }
 }
 
 // レバーを入れるとその場でランプが点き、戻すと 4gt 後に消える (V11 §4.1)。

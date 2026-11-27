@@ -151,23 +151,43 @@ describe('Rust の依存の見張り (19 §9.3)', () => {
   })
 
   // CLAUDE.md の「unsafe は rse-wasm だけ」。rse-wasm の中でも、unsafe のブロックは作業領域の読み書き
-  // (scratch.rs) だけに置き、#[unsafe(no_mangle)] の属性は書き出しの関数 (exports.rs) だけに置く (#9)
+  // (scratch.rs) だけに置き、unsafe の属性 (no_mangle) は書き出しの関数 (exports.rs) だけに置く (#9)。
+  // unsafe_code を許す (allow・expect) のもこの 2 つだけで、rse-wasm の lib.rs は crate 全体で deny する。
+  // doctest の中の unsafe は crate の forbid が効かない。今の crate に doctest は無い (doc(test(attr(…))) は後で)
   it('unsafe は rse-wasm の決めたファイルだけで、ほかの crate は forbid(unsafe_code)', () => {
     const SCRATCH = 'crates/rse-wasm/src/scratch.rs'
     const EXPORTS = 'crates/rse-wasm/src/exports.rs'
+    const WASM_ROOT = 'crates/rse-wasm/src/lib.rs'
     const hits: string[] = []
     const roots = tracked().filter(f => /^crates\/[^/]+\/src\/(lib|main)\.rs$/.test(f))
     for (const f of roots.filter(f => !f.startsWith('crates/rse-wasm/'))) {
       if (!/^#!\[forbid\(unsafe_code\)\]$/m.test(readText(f) ?? '')) hits.push(`${f}: #![forbid(unsafe_code)] が無い`)
     }
+    if (!/^#!\[deny\(unsafe_code\)\]$/m.test(readText(WASM_ROOT) ?? '')) hits.push(`${WASM_ROOT}: #![deny(unsafe_code)] が無い`)
     for (const f of tracked().filter(f => f.startsWith('crates/') && f.endsWith('.rs'))) {
       const text = readText(f) ?? ''
       text.split('\n').forEach((line, i) => {
         const t = line.trim()
         if (t.startsWith('//')) return
         if (/\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)/.test(t) && f !== SCRATCH) hits.push(`${f}:${i + 1} unsafe のブロック・関数: ${t}`)
-        if (/#\[unsafe\(/.test(t) && f !== EXPORTS) hits.push(`${f}:${i + 1} unsafe の属性: ${t}`)
+        // #[unsafe(…)] も #[cfg_attr(…, unsafe(…))] も拾う
+        if (/\bunsafe\s*\(/.test(t) && f !== EXPORTS) hits.push(`${f}:${i + 1} unsafe の属性: ${t}`)
+        if (/\b(allow|expect|warn)\s*\([^)]*\bunsafe_code\b/.test(t) && f !== SCRATCH && f !== EXPORTS) {
+          hits.push(`${f}:${i + 1} unsafe_code を許している: ${t}`)
+        }
+        // doctest の中 (/// や //! の後ろ) の unsafe は、上の行の判定で読み飛ばしている。doctest を足す時は crate に
+        // #![doc(test(attr(forbid(unsafe_code))))] を付ける
       })
+      // 注の中のコードの囲み (```) を開きと閉じで数え、Rust として回る開き (言葉なし・rust ほか) を拾う
+      let open = false
+      for (const [i, line] of text.split('\n').entries()) {
+        const fence = /^\s*\/\/[/!]\s*```\s*([\w,-]*)\s*$/.exec(line)
+        if (!fence) continue
+        if (!open && /^(rust|should_panic|no_run|compile_fail)?$/.test(fence[1])) {
+          hits.push(`${f}:${i + 1} doctest がある (forbid が効かないので、先に doc(test(attr(forbid(unsafe_code)))) を付ける)`)
+        }
+        open = !open
+      }
     }
     expect(hits, `unsafe の置き場は ${SCRATCH} (ブロック) と ${EXPORTS} (no_mangle) だけ\n${hits.join('\n')}`).toEqual([])
   })

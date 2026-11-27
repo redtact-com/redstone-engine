@@ -32,19 +32,7 @@ jobs:
         run: cargo test -p rse-engine --no-default-features
       - name: wasm のビルド
         run: cargo build -p rse-wasm --target wasm32-unknown-unknown --release
-      - name: 大きさの報告 (合否にしない)
-        run: |
-          node -e '
-            const fs = require("fs"), z = require("zlib")
-            const p = "target/wasm32-unknown-unknown/release/rse_wasm.wasm"
-            const b = fs.readFileSync(p)
-            const gz = z.gzipSync(b, { level: 9 }).length
-            const br = z.brotliCompressSync(b, { params: { [z.constants.BROTLI_PARAM_QUALITY]: 11 } }).length
-            const row = `| rse_wasm.wasm | ${b.length} | ${gz} | ${br} |`
-            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
-              "## 大きさ (バイト。合否にしない)\n\n| 物 | 素 | gzip | brotli |\n|---|---:|---:|---:|\n" + row + "\n")
-            console.log(row)
-          '
+      # 大きさの報告 (wasm・状態表の JSON・JS) は js の job でまとめて出す (重ねない)
 
   js:
     runs-on: ubuntu-latest

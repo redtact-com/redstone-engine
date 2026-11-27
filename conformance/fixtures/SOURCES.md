@@ -21,7 +21,7 @@
 - 実行器は、読まない欄 (trustAuthored・scheduled・comparators・cooldowns・skipUntil・skipReason・blocks の items ほか) を持つ fixture を断る。
   そういう fixture を足す時は、先に実行器がその欄を読めるようにする。
 - 実行器 (crates/rse-cli の fixture) は、毎 tick、`region` の全マスの blockstate の文字列を比べる。`cargo test -p rse-cli` で回る。手で回す時は `cargo run -p rse-cli -- fixture conformance/fixtures/*.json`。
-- 同じ 2 本を、wasm でも回す (packages/engine-js/test/fixture.test.ts。`npm test` で回る)。数え方と断り方は native の実行器と同じで、
-  実際の盤面は変化の列 (rse_changes) だけで直した写しを比べる。native の実行器と報告の文が同じになることも確かめる。
+- ここの全部を、wasm でも回す (packages/engine-js/test/fixture.test.ts。`npm test` で回る)。数え方と断り方は native の実行器と同じで、
+  実際の盤面は変化の列 (rse_changes) だけで直した写しを比べる。native の実行器に全部を渡し、報告の文 (合わない時の全文と、断る時の文も) が同じになることも確かめる。
 - 1.21.1 で撮った fixture の、同じ tick の入力は、`inputs` に書いてある並びのまま適用する (redstone-sim の docs/vanilla の V01 §2.4)。
 - fixture を足す時は、この表に 1 行足す。

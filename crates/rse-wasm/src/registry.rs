@@ -1,9 +1,11 @@
 //! 世界の表と、窓口の関数の中身。unsafe を使わない (読み書きは scratch.rs を通す)。
 //!
 //! - 世界はハンドル (u32) で持つ。下の 16 ビットが席の番号 + 1、上の 16 ビットが席の世代である。
-//!   捨てた席は使い回すが、世代を 1 つ進めるので、捨てた世界の古いハンドルは別の世界に当たらない
-//!   (同じ席を 65,536 回使い回すと世代が一周する。そこまで古いハンドルを持ち続ける使い方はしない)。
-//!   0 は、どの世界のハンドルにもならない。
+//!   捨てた席は使い回し、世代を 1 つ進める。世代が最後 (0xFFFF) の世界を捨てた席は、使い回さずに退かせる
+//!   (世代が一周しない)。だから、同じハンドルが 2 つの世界を指すことは無く、捨てた世界の古いハンドルは
+//!   いつまでも HANDLE を返す。0 は、どの世界のハンドルにもならない。
+//! - 限り: 同時に持てる世界は 65,535 個 (席の数)。作れる世界の延べの数は 65,535 席 × 65,536 世代で、
+//!   使い切ると `rse_world_new` は 0 を返す (インスタンスを読み直すまで)。
 //! - 表は thread_local に 1 つ持つ。wasm は単一スレッドなので 1 つになり、native のテストは
 //!   スレッドごとに別の表になる。
 
@@ -13,8 +15,8 @@ use rse_engine::rse_core::state::{ParseError, STATE_COUNT};
 use rse_engine::{Config, Input, InputSection, Pos, StateId, Status, World, new_world};
 use std::cell::RefCell;
 
-/// 同時に持てる世界の数 (席の番号 + 1 が 16 ビットに入る数)。
-const MAX_WORLDS: usize = 0xFFFF;
+/// 席の数 (席の番号 + 1 が 16 ビットに入る数)。同時に持てる世界の数でもある。
+const MAX_SLOTS: usize = 0xFFFF;
 
 struct Entry {
     world: World,
@@ -80,10 +82,28 @@ impl Registry {
         self.scratch.len_bytes()
     }
 
+    /// テスト: 作業領域 (と、その確かめ) を借りる。
+    #[cfg(test)]
+    pub(crate) fn scratch_mut(&mut self) -> &mut Scratch {
+        &mut self.scratch
+    }
+
+    /// テスト: `rse_changes` が返した番地と件数が、その世界の変化の列そのものなら、写しを返す。
+    #[cfg(test)]
+    pub(crate) fn changes_at(
+        &mut self,
+        handle: u32,
+        ptr: *const CellRec,
+        n: usize,
+    ) -> Option<Vec<CellRec>> {
+        let entry = self.entry(handle)?;
+        (entry.changes.as_ptr() == ptr && entry.changes.len() == n).then(|| entry.changes.clone())
+    }
+
     pub(crate) fn world_new(&mut self) -> u32 {
         let index = match self.free.pop() {
             Some(index) => index,
-            None if self.slots.len() < MAX_WORLDS => {
+            None if self.slots.len() < MAX_SLOTS => {
                 self.slots.push(Slot {
                     generation: 0,
                     entry: None,
@@ -107,8 +127,11 @@ impl Registry {
         let index = (handle & 0xFFFF) as usize - 1;
         let slot = &mut self.slots[index];
         slot.entry = None;
-        slot.generation = slot.generation.wrapping_add(1);
-        self.free.push(index);
+        // 世代が最後なら、席を退かせる (空いた席の一覧に戻さない)。世代は一周させない。
+        if let Some(next) = slot.generation.checked_add(1) {
+            slot.generation = next;
+            self.free.push(index);
+        }
         Status::OK.0
     }
 
@@ -159,12 +182,21 @@ impl Registry {
         if cells.iter().any(|c| !world.in_bounds(pos(c))) {
             return status::OUT_OF_WORLD;
         }
-        // 格子の枠 (離れすぎた 2 点) は置いてみるまで分からない。そこで止め、途中まで置いた世界が残る。
-        // JS 側は、この時は世界を捨てて作り直す (docs/wasm-abi.md)。
+        // 格子の枠 (離れすぎた 2 点) は置いてみるまで分からない。置けなかったら、それまでに置いたマスを
+        // 逆の順に前の状態へ戻し、1 つも置かなかった形にする (全部か無しか)。書いて戻したマスは正味の変化に
+        // ならない (19 §3.8)。広げた格子 (空のセクションの席) は残るが、読める状態は変わらない。
+        let mut placed: Vec<(Pos, StateId)> = Vec::with_capacity(cells.len());
         for c in cells {
-            if !world.set_state_raw(pos(c), StateId(c.state as u16)) {
+            let at = pos(c);
+            let before = world.get_state(at);
+            if !world.set_state_raw(at, StateId(c.state as u16)) {
+                for (at, before) in placed.into_iter().rev() {
+                    // 一度書けた所なので、戻す書き込みは必ず通る。
+                    world.set_state_raw(at, before);
+                }
                 return status::OUT_OF_WORLD;
             }
+            placed.push((at, before));
         }
         Status::OK.0
     }

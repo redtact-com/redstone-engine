@@ -101,36 +101,19 @@ impl Scratch {
     }
 }
 
-/// テストの側から作業領域と変化の列を読み書きする。JS がするのと同じ、番地を使った読み書き。
+/// テストの側から作業領域を書く (JS が型付き配列で書くのと同じ)。読むのは `bytes` で足りる。
 #[cfg(test)]
-pub(crate) mod testing {
-    use crate::CellRec;
-    use core::slice;
-
-    /// `ptr` に `data` を書く。
-    ///
-    /// 呼ぶ側の前提: `ptr` は直前の `rse_scratch(len)` (`len >= data.len()`) の返り値かその内で、
-    /// その後に作業領域を広げていない。
-    pub(crate) fn poke(ptr: *mut u8, data: &[u8]) {
-        // SAFETY: 上の前提により、`ptr` から `data.len()` バイトは作業領域の確保の内で書ける。
-        // `data` はテストの側の値なので、作業領域と重ならない。窓口の中は動いていないので、
-        // 作業領域を指す Rust の参照は無い。
-        unsafe { ptr.copy_from_nonoverlapping(data.as_ptr(), data.len()) };
-    }
-
-    /// `ptr` の u32 を読む。前提は `poke` と同じ (4 バイトに揃っていること)。
-    pub(crate) fn peek_u32(ptr: *const u8) -> u32 {
-        // SAFETY: `poke` と同じ前提で、`ptr` から 4 バイトは作業領域の内で初期化済み。
-        // 揃っていない時に備えて、揃えを求めない読み方をする。
-        unsafe { ptr.cast::<u32>().read_unaligned() }
-    }
-
-    /// `rse_changes` が返した列を写す。
-    ///
-    /// 呼ぶ側の前提: `ptr` と `n` は直前の `rse_changes` の返り値と件数で、その後に窓口を呼んでいない。
-    pub(crate) fn peek_cells(ptr: *const CellRec, n: usize) -> Vec<CellRec> {
-        // SAFETY: 上の前提により、`ptr` は世界の変化の列 (Vec<CellRec>) の先頭で、`n` 件が初期化済み。
-        // 次に窓口を呼ぶまで、列は書き換わらず動かない。空の列でも、Vec の先頭は null でなく揃っている。
-        unsafe { slice::from_raw_parts(ptr, n) }.to_vec()
+impl Scratch {
+    /// `addr` から `data` を書く。作業領域の外なら何もせず偽。
+    pub(crate) fn poke(&mut self, addr: usize, data: &[u8]) -> bool {
+        let Some(at) = self.offset(addr, data.len(), 1) else {
+            return false;
+        };
+        let target = self.words.as_mut_ptr().cast::<u8>().wrapping_add(at);
+        // SAFETY: `offset` が `at..at + data.len()` を作業領域の確保の内と確かめた。ポインタは `&mut self` の
+        // Vec から取ったので、書く間にほかの参照は無い。`data` はテストの側の値で、作業領域と重ならない
+        // (作業領域を指す参照は `&mut self` の外に無い)。u8 は Drop を持たない。
+        unsafe { target.copy_from_nonoverlapping(data.as_ptr(), data.len()) };
+        true
     }
 }

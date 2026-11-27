@@ -27,13 +27,15 @@ pub extern "C" fn rse_scratch(len: u32) -> *mut u8 {
     with(|r| r.scratch(len))
 }
 
-/// 世界を作り、ハンドルを返す。席が尽きたら 0。
+/// 世界を作り、ハンドルを返す。席が尽きたら 0 (限りは registry.rs の冒頭)。
 #[unsafe(no_mangle)]
 pub extern "C" fn rse_world_new() -> u32 {
     with(|r| r.world_new())
 }
 
 /// 世界を捨てる。ハンドルが無ければ HANDLE を返す (2 回捨てた時も)。
+///
+/// 19 §2.5 の例は返り値を持たないが、古いハンドルや 2 回目の解放を黙って通さないために状態コードを返す。
 #[unsafe(no_mangle)]
 pub extern "C" fn rse_world_free(handle: u32) -> u32 {
     with(|r| r.world_free(handle))
@@ -54,8 +56,8 @@ pub extern "C" fn rse_resolve(ptr: *const u8, len: u32, out: *mut u32) -> u32 {
 ///
 /// `recs..recs + 16n` は作業領域の内で、4 バイトに揃うこと (外なら ARGUMENT)。
 /// `mode` は `load_mode`。SETTLED は更新を出さずに置く (19 §4.2 の「そのまま」)。REBUILD は席だけで
-/// UNIMPLEMENTED を返す。StateId が表の外 (ARGUMENT) か、高さの外 (OUT_OF_WORLD) のマスがあれば、
-/// 1 つも置かない。置いたマスは変化の列に載る。
+/// UNIMPLEMENTED を返す。StateId が表の外 (ARGUMENT) か、高さの外・格子の枠の外 (OUT_OF_WORLD) のマスが
+/// あれば、1 つも置かない (格子の枠は置いてみて分かるので、置いた分を戻す)。置いたマスは変化の列に載る。
 #[unsafe(no_mangle)]
 pub extern "C" fn rse_load(handle: u32, recs: *const CellRec, n: u32, mode: u32) -> u32 {
     with(|r| r.load(handle, recs.addr(), n, mode))
@@ -70,7 +72,8 @@ pub extern "C" fn rse_step(handle: u32, n: u32) -> u32 {
 /// tick の外の入力を 1 件入れ、連鎖を回し切ってから、立ったエンジンの状態コードを返す。
 ///
 /// `kind` は `input_kind`、`section` は区間の印 (0 = B5・1 = C・2 = A・3 = B1。19 §4.1)。
-/// 区間の印は順を変えない (呼んだ順に適用する)。
+/// 区間の印は順を変えない (呼んだ順に適用する)。`arg` は、use なら 0、setblock なら下の 16 ビットが StateId で
+/// ビット 16 が strict (ビット 17 以上が立っていれば ARGUMENT)。
 #[unsafe(no_mangle)]
 pub extern "C" fn rse_input(
     handle: u32,

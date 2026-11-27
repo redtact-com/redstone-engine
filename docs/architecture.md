@@ -13,7 +13,7 @@
 | crates/rse-engine | 組み立て。族を feature で選び、振る舞いの振り分けを持つ | rse-core・rse-blocks-* |
 | crates/rse-wasm | wasm の窓口 (C ABI)。unsafe はここだけ | rse-engine |
 | crates/rse-cli | native の道具 (fixture の実行器・状態表の書き出し)。serde はここだけ | rse-engine |
-| packages/engine-js | wasm の読み込み・世界のハンドル・変化の窓・状態表 (TS)。窓口の決まりは docs/wasm-abi.md | rse-wasm の出力 |
+| packages/engine-js | wasm の読み込み・世界のハンドル・変化の窓・状態表 (TS)。窓口の決まりは docs/wasm-abi.md | rse-wasm の出力 (wasm)・rse-cli の出力 (状態表の JSON) |
 | packages/board | 盤面の型と編集 (置く・消す・選ぶ)。エンジンに依らない | なし |
 | packages/view-3d | 3D の描画と、押した座標の判定 (redstone-sim の packages/viewer を移す) | board の型 |
 | apps/web | アプリ。機能のパッケージを組み立てるだけ | packages/* |

@@ -2,6 +2,7 @@
 //
 // `npm run build:engine` (と、`npm test` の前の pretest) が呼ぶ。cargo が要る。
 // テストが古い wasm で回らないよう、毎回 cargo を呼ぶ (変わっていなければ cargo はすぐ終わる)。
+// target の場所は cargo に聞く (CARGO_TARGET_DIR・.cargo/config の build.target-dir のどれでも合う)。
 import { execFileSync } from 'node:child_process'
 import { copyFileSync, mkdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -10,9 +11,11 @@ import { fileURLToPath } from 'node:url'
 const pkg = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const root = resolve(pkg, '..', '..')
 const out = join(pkg, 'generated')
-const target = process.env.CARGO_TARGET_DIR ? resolve(root, process.env.CARGO_TARGET_DIR) : join(root, 'target')
 
 const cargo = (...args) => execFileSync('cargo', args, { cwd: root, stdio: 'inherit' })
+const target = JSON.parse(
+  execFileSync('cargo', ['metadata', '--format-version', '1', '--no-deps'], { cwd: root, encoding: 'utf-8' }),
+).target_directory
 
 mkdirSync(out, { recursive: true })
 cargo('build', '-p', 'rse-wasm', '--target', 'wasm32-unknown-unknown', '--release')

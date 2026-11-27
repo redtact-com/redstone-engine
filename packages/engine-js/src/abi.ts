@@ -1,7 +1,8 @@
 /**
  * wasm の窓口 (C ABI) の形。Rust 側は crates/rse-wasm、表と決まりは docs/wasm-abi.md にある。
  *
- * ここの値は境界を越えるので、Rust 側と同じ値で固定する。変えたら両方の ABI_VERSION を上げる。
+ * ここの値 (関数・記録の並び・状態コードのビット・種類 / 区間 / 型の番号) は境界を越えるので、
+ * Rust 側と同じ値で固定する。変えたら両方の ABI_VERSION を上げる。
  */
 
 /** 窓口の版。読み込んだ wasm の rse_abi_version と合わなければ断る */
@@ -115,5 +116,20 @@ export class EngineError extends Error {
     super(`${what}: ${statusNames(status).join(' | ')}`)
     this.name = 'EngineError'
     this.status = status >>> 0
+  }
+}
+
+/**
+ * wasm の中で trap (WebAssembly.RuntimeError) が起きた後の例外。
+ *
+ * release の wasm は panic = abort なので、中の panic (今の経路では割り当ての失敗) は trap になる。
+ * trap の後はインスタンスの中の表が借りたまま戻らず、どの関数も trap し続ける。
+ * インスタンスが壊れた印なので、Engine ごと捨てて読み直す (docs/wasm-abi.md §4)。
+ */
+export class EngineStoppedError extends Error {
+  constructor(what: string, cause: unknown) {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    super(`${what}: wasm の中で trap が起きて、この Engine は止まった。Engine ごと捨てて読み直す (${reason})`, { cause })
+    this.name = 'EngineStoppedError'
   }
 }

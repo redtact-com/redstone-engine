@@ -6,13 +6,14 @@
  * - 盤面は更新を出さずに置く (load の settled)。
  * - 期待は変化のあった tick の差分。差分を積んだ盤面と、領域の全マスを毎 tick 比べる。書いていないマスは空気。
  * - 実際の盤面は、変化の窓 (rse_changes) だけで直した写しである。wasm から 1 マスずつ読む関数は無いので、
- *   変化の列の抜けや余りも、ここで不一致として出る。
+ *   変化の列の抜け (書き出さなかった変化) と違う状態は、ここで不一致として出る。余り (変わっていないマスの
+ *   書き出し) は写しを変えないので出ない。余りが無いこと (正味の変化) は rse-wasm と rse-core の単体テストが見る。
  * - 状態コードが立ったら不一致と同じに扱う。
  * - 表に無いブロック・知らない入力・読まない欄は、エラーで止める。文は native と同じにする。
  */
 
 import type { Engine } from '../src/engine'
-import { SECTION, type Section, statusNames } from '../src/abi'
+import { ABI_STATUS, EngineError, SECTION, type Section, statusNames } from '../src/abi'
 
 export interface Pos {
   readonly x: number
@@ -83,30 +84,33 @@ function onlyKnown(value: unknown, place: string, known: string[]): Json {
   return value as Json
 }
 
-function field(value: Json, name: string): unknown {
-  if (!(name in value)) throw new Error(`欄 ${name} が無い`)
-  return value[name]
+/** オブジェクトでない値も「欄が無い」と読む (native の serde_json の Value::get と同じ) */
+function field(value: unknown, name: string): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value) || !Object.hasOwn(value, name)) {
+    throw new Error(`欄 ${name} が無い`)
+  }
+  return (value as Json)[name]
 }
 
-function text(value: Json, name: string): string {
+function text(value: unknown, name: string): string {
   const v = field(value, name)
   if (typeof v !== 'string') throw new Error(`欄 ${name} が文字列でない`)
   return v
 }
 
-function list(value: Json, name: string): unknown[] {
+function list(value: unknown, name: string): unknown[] {
   const v = field(value, name)
   if (!Array.isArray(v)) throw new Error(`欄 ${name} が配列でない`)
   return v
 }
 
-function tickOf(value: Json, name: string): number {
+function tickOf(value: unknown, name: string): number {
   const v = field(value, name)
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`欄 ${name} が 0 以上の整数でない`)
   return v
 }
 
-function posOf(value: Json, name: string): Pos {
+function posOf(value: unknown, name: string): Pos {
   const v = field(value, name)
   const ok = (n: unknown) => typeof n === 'number' && Number.isInteger(n) && n >= -0x80000000 && n <= 0x7fffffff
   if (!Array.isArray(v) || v.length !== 3 || !v.every(ok)) throw new Error(`欄 ${name} が整数 3 つの配列でない`)
@@ -138,9 +142,7 @@ export function parseFixture(json: string, engine: Engine): Fixture {
   if (unknown.length > 0) throw new Error(`状態表に無いブロック: ${unknown.join(', ')}`)
 
   const inputs: Fixture['inputs'] = []
-  for (const entry of list(root, 'inputs')) {
-    if (entry === null || typeof entry !== 'object') throw new Error('inputs の項目 がオブジェクトでない')
-    const e = entry as Json
+  for (const e of list(root, 'inputs')) {
     const pos = posOf(e, 'pos')
     const action = text(e, 'action')
     // 右クリックはプレイヤーの操作 (区間 A。19 §4.1)。
@@ -191,6 +193,24 @@ function* region(f: Fixture): Generator<Pos> {
   }
 }
 
+/** native と同じく fixture の並びで 1 マスずつ置き、最初に置けないマスを返す */
+function firstUnplaceable(f: Fixture, engine: Engine): Pos | undefined {
+  const probe = engine.createWorld()
+  try {
+    for (const b of f.blocks) {
+      try {
+        probe.load([{ ...b.pos, state: b.state }])
+      } catch (e) {
+        if (e instanceof EngineError && e.status & ABI_STATUS.OUT_OF_WORLD) return b.pos
+        throw e
+      }
+    }
+    return undefined
+  } finally {
+    probe.dispose()
+  }
+}
+
 /** wasm の世界で回して、毎 tick の領域の全マスを期待と比べる */
 export function runFixture(f: Fixture, engine: Engine): Report {
   const air = engine.states.name(0)
@@ -213,7 +233,10 @@ export function runFixture(f: Fixture, engine: Engine): Report {
       const status = world.load(f.blocks.map(b => ({ ...b.pos, state: b.state })))
       if (status !== 0) throw new Error(`置いた時に状態コード ${statusNames(status).join(' | ')}`)
     } catch (e) {
-      throw new Error(`初めの盤面を置けない: ${(e as Error).message}`)
+      // load は全部か無しかなので、native と同じ文 (最初に置けないマスの座標) のために、1 マスずつ置き直して探す。
+      const at = e instanceof EngineError && e.status & ABI_STATUS.OUT_OF_WORLD ? firstUnplaceable(f, engine) : undefined
+      if (at === undefined) throw e
+      throw new Error(`(${at.x}, ${at.y}, ${at.z}) に置けない (高さか格子の枠の外)`)
     }
     sync()
 
