@@ -150,6 +150,28 @@ describe('Rust の依存の見張り (19 §9.3)', () => {
     expect(hits, `エンジンの crate に外部の依存を入れない\n${hits.join('\n')}`).toEqual([])
   })
 
+  // CLAUDE.md の「unsafe は rse-wasm だけ」。rse-wasm の中でも、unsafe のブロックは作業領域の読み書き
+  // (scratch.rs) だけに置き、#[unsafe(no_mangle)] の属性は書き出しの関数 (exports.rs) だけに置く (#9)
+  it('unsafe は rse-wasm の決めたファイルだけで、ほかの crate は forbid(unsafe_code)', () => {
+    const SCRATCH = 'crates/rse-wasm/src/scratch.rs'
+    const EXPORTS = 'crates/rse-wasm/src/exports.rs'
+    const hits: string[] = []
+    const roots = tracked().filter(f => /^crates\/[^/]+\/src\/(lib|main)\.rs$/.test(f))
+    for (const f of roots.filter(f => !f.startsWith('crates/rse-wasm/'))) {
+      if (!/^#!\[forbid\(unsafe_code\)\]$/m.test(readText(f) ?? '')) hits.push(`${f}: #![forbid(unsafe_code)] が無い`)
+    }
+    for (const f of tracked().filter(f => f.startsWith('crates/') && f.endsWith('.rs'))) {
+      const text = readText(f) ?? ''
+      text.split('\n').forEach((line, i) => {
+        const t = line.trim()
+        if (t.startsWith('//')) return
+        if (/\bunsafe\s*(\{|fn\b|impl\b|trait\b|extern\b)/.test(t) && f !== SCRATCH) hits.push(`${f}:${i + 1} unsafe のブロック・関数: ${t}`)
+        if (/#\[unsafe\(/.test(t) && f !== EXPORTS) hits.push(`${f}:${i + 1} unsafe の属性: ${t}`)
+      })
+    }
+    expect(hits, `unsafe の置き場は ${SCRATCH} (ブロック) と ${EXPORTS} (no_mangle) だけ\n${hits.join('\n')}`).toEqual([])
+  })
+
   it('include_bytes / include_str は決めたフォルダ (crates/*/data・conformance) の物だけ読む', () => {
     const hits: string[] = []
     for (const f of tracked().filter(f => f.endsWith('.rs'))) {

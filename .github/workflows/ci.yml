@@ -50,6 +50,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # engine-js のテストは wasm と状態表の JSON を使う。npm test の前 (pretest) に cargo で作る
+      - name: Rust の toolchain (rust-toolchain.toml のとおり)
+        run: |
+          rustup toolchain install || true
+          rustup show
+      - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -57,5 +63,7 @@ jobs:
       - run: npm ci
       - name: 型
         run: npm run typecheck
-      - name: テスト (IP の検査を含む)
+      - name: テスト (wasm と状態表の JSON を作ってから。fixture の wasm での実行・IP の検査を含む)
         run: npm test
+      - name: 大きさの報告 (wasm・状態表の JSON・JS。合否にしない)
+        run: npm run size

@@ -13,7 +13,7 @@
 | crates/rse-engine | 組み立て。族を feature で選び、振る舞いの振り分けを持つ | rse-core・rse-blocks-* |
 | crates/rse-wasm | wasm の窓口 (C ABI)。unsafe はここだけ | rse-engine |
 | crates/rse-cli | native の道具 (fixture の実行器・状態表の書き出し)。serde はここだけ | rse-engine |
-| packages/engine-js | wasm の読み込み・世界のハンドル・変化の窓・状態表 (TS) | rse-wasm の出力 |
+| packages/engine-js | wasm の読み込み・世界のハンドル・変化の窓・状態表 (TS)。窓口の決まりは docs/wasm-abi.md | rse-wasm の出力 |
 | packages/board | 盤面の型と編集 (置く・消す・選ぶ)。エンジンに依らない | なし |
 | packages/view-3d | 3D の描画と、押した座標の判定 (redstone-sim の packages/viewer を移す) | board の型 |
 | apps/web | アプリ。機能のパッケージを組み立てるだけ | packages/* |
@@ -70,7 +70,9 @@ rse-java → rse-core → rse-blocks-*  ┐
 |---|---|
 | Rust の整形・lint・テスト | `cargo fmt --all --check`・`cargo clippy --workspace --all-targets -- -D warnings`・`cargo test --workspace` |
 | wasm | `cargo build -p rse-wasm --target wasm32-unknown-unknown --release` |
+| wasm と状態表の JSON (engine-js が読む生成物) | `npm run build:engine`。`npm test` の前にも走る |
 | JS のテスト・型 | `npm test`・`npm run typecheck` |
+| 大きさの報告 | `npm run size` |
 
 - release の設定は opt-level 3・lto・codegen-units 1・panic abort (19 §2.8)。opt-level z は使わない。
 - clippy で標準の HashMap・HashSet を禁じる (clippy.toml)。反復順を Java と合わせる所は rse-java の写しを使う。
