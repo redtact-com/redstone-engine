@@ -15,7 +15,11 @@
 
 - **expect をエンジンに合わせて書き換えない**。合わない時は、エンジンかメモ (redstone-sim の docs/vanilla) を疑う (docs/architecture.md §6)。
 - 形式は redstone-sim の tools/mc-harness/README.md のとおり。`expect` は変化のあった tick の差分で、tick 0 から `ticks` までを撮ってある。
-  規約は「state[t] は tick t の全相の後、tick t の入力の直後」(redstone-sim の docs/research/19 §4.1)。
+  規約は「state[t] は tick t の全相の後、tick t の入力の直後」(同じ README の「tick 規約」)。
+  初めの盤面は tick −1 の状態で、tick 0 は「tick を進めずに tick 0 の入力を入れた直後」である
+  (redstone-sim の tools/gt-oracle の Driver と、packages/sim/src/fixture-driver.ts の runFixtureOnSim の数え方)。
+- 実行器は、読まない欄 (trustAuthored・scheduled・comparators・cooldowns・skipUntil・skipReason・blocks の items ほか) を持つ fixture を断る。
+  そういう fixture を足す時は、先に実行器がその欄を読めるようにする。
 - 実行器 (crates/rse-cli の fixture) は、毎 tick、`region` の全マスの blockstate の文字列を比べる。`cargo test -p rse-cli` で回る。手で回す時は `cargo run -p rse-cli -- fixture conformance/fixtures/*.json`。
 - 1.21.1 で撮った fixture の、同じ tick の入力は、`inputs` に書いてある並びのまま適用する (redstone-sim の docs/vanilla の V01 §2.4)。
 - fixture を足す時は、この表に 1 行足す。

@@ -79,7 +79,11 @@ impl Rules for Engine {
         other_pos: Pos,
         other: StateId,
     ) -> StateId {
-        // ダストもレバーも、相手の状態は渡された物ではなく世界から読む (V06 §4.7 の表)。
+        // 渡された相手の状態は、今はどの素子にも渡していない。素子は世界から読む。
+        // - ダストの水平と上: 自分で周りを読むので、渡された状態は判定に使わない (V06 §4.7 の表)。
+        // - ダストの下 (支えの判定): UNVERIFIED。渡された状態で見るのか、世界の今の真下で見るのかは
+        //   メモに無い (wire.rs の update_shape の下の腕)。メモが決まったら、ここで渡すかを直す。
+        // - レバー: 支えの面を世界から読む (V09 §4.1)。
         let _ = (pos, dir, other_pos, other);
         match state.behavior() {
             Behavior::Inert => state,

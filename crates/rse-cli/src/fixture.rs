@@ -3,14 +3,22 @@
 //! fixture は、実機で撮った「初めの盤面・入力・tick ごとの変化」である (conformance/fixtures/SOURCES.md)。
 //! 実行器は盤面をそのまま置き、毎 tick、領域の全ブロックの blockstate の文字列を期待と比べる。
 //!
-//! - 規約は「state[t] は tick t の全相の後、tick t の入力の直後」(19 §4.1)。
-//!   tick を 1 回進め、その tick の入力を適用し、状態を読む。t は 0 から `ticks` まで。
+//! - 規約は「state[t] は tick t の全相の後、tick t の入力の直後」
+//!   (redstone-sim の tools/mc-harness/README.md の「tick 規約」・19 §4.1)。t は 0 から `ticks` まで。
+//! - **初めの盤面は tick −1 の状態である**。t = 0 では tick を進めず、tick 0 の入力だけを適用して読む。
+//!   tick を進めるのは t ≧ 1 だけ。26.3 のオラクル (redstone-sim の tools/gt-oracle の Driver。
+//!   settle の最後に tick −1 を撮り、同じ tick の中で tick 0 の入力を入れて tick 0 を撮る) と、
+//!   redstone-sim の TS の実行器 (packages/sim/src/fixture-driver.ts の runFixtureOnSim) と同じ数え方。
+//!   t = 0 の前に 1 回進めると、予約を持ち込む fixture で 1 tick ずれる。
 //! - 盤面は更新を出さずに置く (19 §4.2 の「そのまま」の型)。
 //! - 期待は「変化のあった tick の差分」で書いてある。差分を積んだ盤面と、領域の全マスを比べる。
 //!   書いていないマスは空気である。
 //! - 期待の文字列は、書いてあるまま比べる。エンジンに合わせて直さない。
 //! - 状態コードが立ったら不一致と同じに扱う (未実装の経路を黙って通らない)。
 //! - 表に無いブロック・知らない入力は、エラーで止める (19 §11 の 5)。
+//! - **読まない欄があれば、エラーで止める**。redstone-sim の fixture には、ここがまだ読まない欄
+//!   (trustAuthored・scheduled・comparators・cooldowns・skipUntil・skipReason・blocks の items ほか) を持つ物がある。
+//!   黙って読み飛ばすと、違う比べ方のまま「一致」と出てしまう。
 
 use rse_engine::rse_core::input::{MarkedInput, sort_by_section};
 use rse_engine::{Config, Input, InputSection, Pos, StateId, Status, new_world};
@@ -58,6 +66,8 @@ pub struct Mismatch {
 pub struct Report {
     pub name: String,
     pub ticks: u32,
+    /// tick を進めた回数。t = 0 では進めないので、`ticks` と同じになる。
+    pub ticked: u32,
     /// 比べたマスの数 (tick ごとの領域の全マスの合計)。
     pub compared: usize,
     pub mismatches: Vec<Mismatch>,
@@ -108,6 +118,42 @@ impl fmt::Display for Report {
     }
 }
 
+/// 今読む欄 (上の段)。description と generated は中身を使わないが、比べ方を変えない欄なので通す。
+const ROOT_KEYS: &[&str] = &[
+    "name",
+    "description",
+    "mcVersion",
+    "ticks",
+    "region",
+    "blocks",
+    "inputs",
+    "expect",
+    "generated",
+];
+const REGION_KEYS: &[&str] = &["from", "to"];
+const BLOCK_KEYS: &[&str] = &["pos", "block"];
+/// 入力の項目 (action が use の時)。
+const USE_INPUT_KEYS: &[&str] = &["tick", "pos", "action"];
+const EXPECT_KEYS: &[&str] = &["tick", "changes"];
+const CHANGE_KEYS: &[&str] = &["pos", "block"];
+
+/// 読まない欄があれば断る。`place` は、エラーに出す場所の名前。
+fn only_known(value: &Value, place: &str, known: &[&str]) -> Result<(), String> {
+    let object = value
+        .as_object()
+        .ok_or(format!("{place} がオブジェクトでない"))?;
+    let extra: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|k| !known.contains(k))
+        .collect();
+    if extra.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{place} に読まない欄がある: {}", extra.join(", ")))
+    }
+}
+
 fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, String> {
     value.get(name).ok_or(format!("欄 {name} が無い"))
 }
@@ -150,13 +196,16 @@ impl Fixture {
     pub fn parse(json: &str) -> Result<Fixture, String> {
         let root: Value =
             serde_json::from_str(json).map_err(|e| format!("JSON が読めない: {e}"))?;
+        only_known(&root, "fixture", ROOT_KEYS)?;
         let region = field(&root, "region")?;
+        only_known(region, "region", REGION_KEYS)?;
         let (a, b) = (pos_of(region, "from")?, pos_of(region, "to")?);
 
         // 表に無いブロックは、全部集めてから断る (19 §3.1 の「未知」の段)。
         let mut blocks = Vec::new();
         let mut unknown: Vec<String> = Vec::new();
         for entry in list(&root, "blocks")? {
+            only_known(entry, "blocks の項目", BLOCK_KEYS)?;
             let name = text(entry, "block")?;
             match StateId::parse(&name) {
                 Ok(state) => blocks.push((pos_of(entry, "pos")?, state)),
@@ -176,10 +225,13 @@ impl Fixture {
             let pos = pos_of(entry, "pos")?;
             let marked = match text(entry, "action")?.as_str() {
                 // 右クリックはプレイヤーの操作 (区間 A。19 §4.1)。
-                "use" => MarkedInput {
-                    section: InputSection::A,
-                    input: Input::Use { pos },
-                },
+                "use" => {
+                    only_known(entry, "inputs の項目 (use)", USE_INPUT_KEYS)?;
+                    MarkedInput {
+                        section: InputSection::A,
+                        input: Input::Use { pos },
+                    }
+                }
                 other => return Err(format!("対応していない入力: {other}")),
             };
             inputs.push((tick_of(entry, "tick")?, marked));
@@ -187,8 +239,10 @@ impl Fixture {
 
         let mut expect = Vec::new();
         for entry in list(&root, "expect")? {
+            only_known(entry, "expect の項目", EXPECT_KEYS)?;
             let mut changes = Vec::new();
             for change in list(entry, "changes")? {
+                only_known(change, "changes の項目", CHANGE_KEYS)?;
                 changes.push((pos_of(change, "pos")?, text(change, "block")?));
             }
             expect.push((tick_of(entry, "tick")?, changes));
@@ -257,12 +311,18 @@ impl Fixture {
         let mut report = Report {
             name: self.name.clone(),
             ticks: self.ticks,
+            ticked: 0,
             compared: 0,
             mismatches: Vec::new(),
             statuses: Vec::new(),
         };
         for t in 0..=self.ticks {
-            let mut status = world.tick();
+            // 初めの盤面は tick −1 の状態。t = 0 では進めず、tick 0 の入力だけを適用する (冒頭の注)。
+            let mut status = Status::OK;
+            if t > 0 {
+                status |= world.tick();
+                report.ticked += 1;
+            }
             for marked in self.inputs_at(t) {
                 status |= world.input(marked.section, marked.input).status;
             }
@@ -378,6 +438,66 @@ mod tests {
             (0..=4).map(|x| Pos::new(x, 1, 0)).collect::<Vec<_>>()
         );
         assert!(report.mismatches.iter().all(|m| m.tick == 2));
+    }
+
+    // 初めの盤面は tick −1 の状態で、t = 0 では tick を進めない。進めるのは t ≧ 1 の `ticks` 回だけ。
+    // 今の 3 素子では、t = 0 の前に 1 回進めても盤面に差が出ない (予約を持ち込めない) ので、進めた回数を直に確かめる。
+    #[test]
+    fn tick_zero_applies_inputs_without_ticking() {
+        assert_eq!(run_json(LEVER_WIRE_LAMP).unwrap().ticked, 8);
+        assert_eq!(run_json(LAMP_OFF_DELAY).unwrap().ticked, 18);
+        // t0 に入れる。ticks = 0 なら 1 回も進めずに、入力の直後の盤面を比べる。
+        let mut fixture = Fixture::parse(LEVER_WIRE_LAMP).unwrap();
+        fixture.inputs[0].0 = 0;
+        fixture.expect[0].0 = 0;
+        fixture.ticks = 0;
+        let report = fixture.run().unwrap();
+        assert!(report.passed(), "{report}");
+        assert_eq!(report.ticked, 0);
+        assert_eq!(report.compared, 20);
+    }
+
+    // 19 §4.2 の「点検」: 初めの盤面を置き、入力なしで 8 tick 空回しして、何も変わらないことを確かめる。
+    // 「そのまま」の読み込みは、初めの盤面が静かであることが前提である。状態コードも立たない。
+    #[test]
+    fn initial_boards_are_quiet_for_eight_ticks() {
+        for json in [LEVER_WIRE_LAMP, LAMP_OFF_DELAY] {
+            let mut fixture = Fixture::parse(json).unwrap();
+            fixture.inputs.clear();
+            fixture.expect.clear();
+            fixture.ticks = 8;
+            let report = fixture.run().unwrap();
+            assert!(report.passed(), "{report}");
+            assert_eq!(report.compared, 9 * 20);
+        }
+    }
+
+    // 読まない欄があれば、エラーで止める。黙って読み飛ばさない。
+    #[test]
+    fn unread_fields_are_refused() {
+        let with = |from: &str, to: &str| {
+            assert!(LEVER_WIRE_LAMP.contains(from), "{from}");
+            run_json(&LEVER_WIRE_LAMP.replacen(from, to, 1)).unwrap_err()
+        };
+        assert_eq!(
+            with(
+                r#""ticks": 8,"#,
+                r#""ticks": 8, "trustAuthored": true, "skipUntil": 3,"#
+            ),
+            "fixture に読まない欄がある: skipUntil, trustAuthored"
+        );
+        assert_eq!(
+            with(r#""block": "stone""#, r#""block": "stone", "items": []"#),
+            "blocks の項目 に読まない欄がある: items"
+        );
+        assert_eq!(
+            with(r#""action": "use""#, r#""action": "use", "face": "up""#),
+            "inputs の項目 (use) に読まない欄がある: face"
+        );
+        for extra in ["scheduled", "comparators", "cooldowns", "skipReason"] {
+            let err = with(r#""ticks": 8,"#, &format!(r#""ticks": 8, "{extra}": [],"#));
+            assert_eq!(err, format!("fixture に読まない欄がある: {extra}"));
+        }
     }
 
     // 表に無いブロックと知らない入力は、エラーで止める。

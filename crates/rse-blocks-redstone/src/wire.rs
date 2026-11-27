@@ -220,6 +220,10 @@ pub fn update_shape<R: RedstoneRules>(
     dir: Dir,
 ) -> StateId {
     match (dir, slot(dir)) {
+        // UNVERIFIED: 支えを「世界の今の真下」で判定している。V06 §4.6 は、下から届いた形状更新で
+        // どの状態 (渡された相手の状態か、世界の今の真下か) を見て判定するかを書いていない。
+        // 形状更新が運ぶ相手の状態は積んだ時点の物で、今の状態とは限らない (V04 §5.5)。
+        // 今の 5 種では、2 つが食い違う経路が無い。
         (Dir::Down, _) => {
             if can_survive(lv, pos) {
                 state
