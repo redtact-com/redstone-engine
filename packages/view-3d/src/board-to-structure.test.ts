@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
@@ -782,16 +783,20 @@ const SOURCE_FILE = /\.[cm]?tsx?$/
 /** 試験のファイル */
 const TEST_FILE = /\.test\.[cm]?tsx?$/
 
-function sourcesOf(dir: string): string[] {
-  return (readdirSync(join(VIEW_DIR, dir), { recursive: true }) as string[])
+/** 置き場 (`root` からの `dir`) の下の、見張る TS のファイル (`dir` からの道筋)。`root` は試験で一時のフォルダを渡す */
+function sourcesOf(dir: string, root = VIEW_DIR): string[] {
+  return (readdirSync(join(root, dir), { recursive: true }) as string[])
     .filter(f => SOURCE_FILE.test(f))
     .map(f => join(dir, f))
 }
 
 interface Specifier {
   readonly spec: string
-  /** `module`: import などの指定子・`types`: `/// <reference types=… />`・`path`: `/// <reference path=… />` */
-  readonly kind: 'module' | 'types' | 'path'
+  /**
+   * `module`: import などの指定子・`types`: `/// <reference types=… />`・`path`: `/// <reference path=… />`・
+   * `lib`: `/// <reference lib=… />`
+   */
+  readonly kind: 'module' | 'types' | 'path' | 'lib'
   readonly typeOnly: boolean
   readonly line: number
 }
@@ -799,7 +804,7 @@ interface Specifier {
 /**
  * ファイルの中の、モジュールを指す所を全部集める (構文木で見るので、引用符の種類・改行・注を問わない)。
  * import・export … from・import type・`import(…)`・`require(…)`・型の中の `import('…')`。指定子が文字列でなければ `<式>`。
- * 三重スラッシュの指示 (`types=`・`path=`) も集める。`types: []` の設定はファイルの中の指示を止めない (#14)
+ * 三重スラッシュの指示 (`types=`・`path=`・`lib=`) も集める。設定の `types: []` と `lib` は、ファイルの中の指示を止めない (#14)
  */
 function specifiersOf(file: string, text: string): Specifier[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
@@ -830,6 +835,7 @@ function specifiersOf(file: string, text: string): Specifier[] {
   const lineOf = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1
   for (const d of sf.typeReferenceDirectives) out.push({ spec: d.fileName, kind: 'types', typeOnly: true, line: lineOf(d.pos) })
   for (const d of sf.referencedFiles) out.push({ spec: d.fileName, kind: 'path', typeOnly: true, line: lineOf(d.pos) })
+  for (const d of sf.libReferenceDirectives) out.push({ spec: d.fileName, kind: 'lib', typeOnly: true, line: lineOf(d.pos) })
   return out
 }
 
@@ -859,6 +865,9 @@ function dependencyHits(file: string, text: string): string[] {
     if (kind === 'path') {
       // path= は、先頭が . でなくてもファイルからの相対パスとして読まれる
       if (outside(spec)) hits.push(`${where} (view-3d の外を指す path=)`)
+    } else if (kind === 'lib') {
+      // lib に Node の型は無いが、ブラウザの設定の lib (ES2023・DOM・DOM.Iterable) を広げてしまう
+      if (!isTest) hits.push(`${where} (src に lib= を書かない。ブラウザの設定の lib を広げる)`)
     } else if (kind === 'types') {
       // src では全部外れ (ブラウザの型検査の types: [] をすり抜けて @types/node などを読み込む)
       if (!isTest) hits.push(`${where} (src に types= を書かない。型の束を読み込む)`)
@@ -1011,7 +1020,7 @@ describe('依存の向き (docs/architecture.md §1・§2)', () => {
     expect(hits("// IMPORT { Engine } from '@redstone-engine/engine-js'\nconst a = 1")).toEqual([])
   })
 
-  it('見張りは、三重スラッシュの指示 (types=・path=) と .mts・.cts も拾う (#14)', () => {
+  it('見張りは、三重スラッシュの指示 (types=・path=・lib=) と .mts・.cts も拾う (#14)', () => {
     const hits = (t: string, file = join('src', 'x.ts')) => dependencyHits(file, t.replace(/IMPORT/g, 'import'))
     const ref = (attr: string) => `/// <reference ${attr} />\nexport const a = 1`
     // types= は src では全部外れ (ブラウザの型検査の types: [] をすり抜けて @types/node などを読み込む)
@@ -1023,13 +1032,42 @@ describe('依存の向き (docs/architecture.md §1・§2)', () => {
     expect(hits(ref('path="./types.ts"'))).toEqual([])
     expect(hits(ref('path="renderer/picking.ts"'))).toEqual([])
     expect(hits(ref('path="../../engine-js/src/node.ts"'))).toHaveLength(1)
+    expect(hits(ref('path="sub/../../../engine-js/src/node.ts"'))).toHaveLength(1)   // 先頭が . でなくても外へ出る
     expect(hits(ref('path="../../board/src/types.ts"'), join('test', 'a.test.ts'))).toHaveLength(1)
+    // lib= は src では外れ (ブラウザの設定の lib を広げる)。試験は通す
+    expect(hits(ref('lib="esnext"'))).toHaveLength(1)
+    expect(hits(ref('lib="dom"'))).toHaveLength(1)
+    expect(hits(ref('lib="esnext"'), join('test', 'a.test.ts'))).toEqual([])
     // .mts・.cts も読み、試験のファイルの見分けも同じ
     for (const f of ['a.ts', 'a.tsx', 'a.mts', 'a.cts', 'a.d.ts', 'a.d.mts']) expect(SOURCE_FILE.test(f), f).toBe(true)
     for (const f of ['a.js', 'a.mjs', 'a.json', 'a.ts.bak']) expect(SOURCE_FILE.test(f), f).toBe(false)
     expect(hits("IMPORT { readFileSync } from 'node:fs'", join('src', 'x.mts'))).toHaveLength(1)
     expect(hits("IMPORT { Engine } from '@redstone-engine/engine-js'", join('src', 'x.cts'))).toHaveLength(1)
     expect(hits("IMPORT { readFileSync } from 'node:fs'", join('src', 'x.test.mts'))).toEqual([])
+  })
+
+  it('見張るファイルの一覧は .ts・.tsx・.mts・.cts と型の宣言を拾い、.js は拾わない (一時のフォルダで確かめる)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'view-3d-guard-'))
+    try {
+      mkdirSync(join(root, 'src', 'sub'), { recursive: true })
+      const files: Record<string, string> = {
+        'a.ts': 'export const a = 1',
+        'b.mts': "IMPORT { readFileSync } from 'node:fs'\nexport const b = readFileSync",
+        'c.cts': 'export const c = 1',
+        'd.js': "IMPORT { readFileSync } from 'node:fs'",
+        'e.d.mts': 'export declare const e: number',
+        'sub/f.tsx': 'export const f = 1',
+      }
+      for (const [name, text] of Object.entries(files)) writeFileSync(join(root, 'src', name), text.replace(/IMPORT/g, 'import'))
+      const listed = sourcesOf('src', root)
+      expect([...listed].sort()).toEqual(['a.ts', 'b.mts', 'c.cts', 'e.d.mts', join('sub', 'f.tsx')].map(f => join('src', f)).sort())
+      // 一覧に入った .mts の node: の import を、依存の見張りが拾う (view-3d の src は .tsx を置いてよい)
+      const hits = listed.flatMap(f => dependencyHits(f, readFileSync(join(root, f), 'utf-8')))
+      expect(hits).toHaveLength(1)
+      expect(hits[0].startsWith(`${join('src', 'b.mts')}:1 node:fs`), hits.join(' / ')).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('index.ts は export * を使わず、書き出す名前は決めた一覧のとおり', () => {
