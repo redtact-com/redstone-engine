@@ -500,16 +500,17 @@ describe('置く・壊す・時計 (窓口の版 2)', () => {
     world.dispose()
   })
 
-  // 実機でも何も起きない所は 0 を返す。規則の無い要求は投げずに UNIMPLEMENTED を返す (エンジンの状態コード)。
-  it('置けない所と空気を壊すのは 0、規則の無い要求は UNIMPLEMENTED', () => {
+  // 実機でも何も起きない所は 0 を返し、何も書かない。入った状態のレバーの要求は、切れて置かれる (V09 §4.1)。
+  it('置けない所と空気を壊すのは 0、入った状態のレバーの要求は切れて置かれる', () => {
     const world = engine.createWorld()
     world.load(floor())
     drain(world)
     expect(world.place(0, 0, 0, engine.resolve('redstone_lamp'))).toBe(0) // 石の上書き
     expect(world.place(1, 3, 1, engine.resolve('redstone_wire'))).toBe(0) // 支えが無い
     expect(world.breakBlock(1, 1, 1)).toBe(0) // 空気
-    expect(world.place(1, 1, 1, engine.resolve('lever[face=floor,powered=true]'))).toBe(STATUS.UNIMPLEMENTED)
     expect(drain(world)).toEqual([])
+    expect(world.place(1, 1, 1, engine.resolve('lever[face=floor,powered=true]'))).toBe(0)
+    expect(drain(world)).toEqual([{ x: 1, y: 1, z: 1, block: 'lever[face=floor,facing=north,powered=false]' }])
     world.dispose()
   })
 

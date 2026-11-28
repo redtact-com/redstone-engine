@@ -251,7 +251,8 @@ impl Registry {
                     return status::ARGUMENT;
                 }
                 // 高さの外と格子の枠の外は、置く前に rse_load と同じ確かめで断る。rse-core の置く手順は、
-                // 格子の枠の外では書き込みまで進んで SAFETY を立てるので、窓口からはそこへ渡さない。
+                // 格子の枠の外では書き込みまで進んで SAFETY を立て、高さの外でも置いた時の状態と支えの口を呼んでから
+                // 書き込みで断る (規則の無い種類なら UNIMPLEMENTED が立つ) ので、窓口からはそこへ渡さない。
                 // 置かれる状態は要求と同じブロックで空気にならないので、要求の状態で確かめてよい。
                 if !entry.world.can_set_all_raw([(pos, state)]) {
                     return status::OUT_OF_WORLD;

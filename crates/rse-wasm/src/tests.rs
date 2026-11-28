@@ -617,14 +617,11 @@ fn place_and_break_go_through_the_engine() {
     assert_eq!(place(h, 1, 3, 1, "lever[face=floor,facing=east]"), 0);
     assert_eq!(break_at(h, 3, 1, 1), 0);
     assert_eq!(changes(h).unwrap(), []);
-    // 規則の無い要求 (入った状態のレバー) は、何も書かずに UNIMPLEMENTED を返す。
+    // 支えのある所なら、石もランプもレバーも置ける。レバーは、入った状態を要求しても切れて置かれる (V09 §4.1)。
     assert_eq!(
         place(h, 3, 1, 1, "lever[face=floor,facing=east,powered=true]"),
-        Status::UNIMPLEMENTED.0
+        0
     );
-    assert_eq!(changes(h).unwrap(), []);
-    // 支えのある所なら、石もランプもレバーも置ける。
-    assert_eq!(place(h, 3, 1, 1, "lever[face=floor,facing=east]"), 0);
     assert_eq!(place(h, 4, 1, 1, "redstone_lamp"), 0);
     assert_eq!(place(h, 1, 5, 1, "stone"), 0);
     assert_eq!(
@@ -690,7 +687,8 @@ fn place_and_break_arguments_are_checked() {
 }
 
 // 置く前に rse_load と同じ確かめ (can_set_all_raw) で、高さの外と格子の枠の外を断る (PR #16 の承認の 2)。
-// rse-core を直に呼ぶと、高さの外は何もせず 0、格子の枠の外は書き込みまで進んで SAFETY になる。
+// rse-core を直に呼ぶと、高さの外は、置いた時の状態と支えの口を呼んでから書き込みが断るので 0 (規則の無い種類なら
+// UNIMPLEMENTED。今の状態表には無い)、格子の枠の外は書き込みまで進んで SAFETY になる。
 // 窓口は OUT_OF_WORLD を返し、SAFETY を立てず、世界も格子も変えない。壊すは範囲を確かめず、同じ所でも 0。
 #[test]
 fn place_outside_the_world_is_refused_before_the_engine() {
@@ -811,10 +809,16 @@ fn abi_matches_the_engine_with_place_and_break() {
         "lever[face=floor,facing=east]",
         "lever[face=wall,facing=south]",
         "lever[face=ceiling,facing=west]",
-        // 規則の無い要求 (UNIMPLEMENTED)。
+        // 入った状態の要求 (切れて置かれる。V09 §4.1)。
         "lever[face=floor,facing=north,powered=true]",
+        "lever[face=wall,facing=east,powered=true]",
     ]
     .map(id);
+    // 入った状態の要求と、置かれる状態 (切れたレバー)。
+    let powered_requests = [
+        (palette[9], id("lever[face=floor,facing=north]")),
+        (palette[10], id("lever[face=wall,facing=east]")),
+    ];
     let sections = [
         InputSection::B5,
         InputSection::C,
@@ -843,7 +847,7 @@ fn abi_matches_the_engine_with_place_and_break() {
     }
     assert_eq!(changes(h).unwrap(), drain(&mut direct));
     let mut rng = Lcg(0x5EED_0013);
-    let (mut placed, mut unimplemented) = (0, 0);
+    let (mut placed, mut placed_powered, mut refused, mut unimplemented) = (0, 0, 0, 0);
     for t in 1..=400 {
         assert_eq!(rse_step(h, 1), direct.tick().0, "tick {t}");
         for _ in 0..rng.below(4) {
@@ -869,15 +873,28 @@ fn abi_matches_the_engine_with_place_and_break() {
             let got = rse_input(h, kind, section, x, y, z, arg);
             let want = direct.input(sections[section as usize], input);
             assert_eq!(got, want.status.0, "tick {t} {input:?}");
-            placed += usize::from(kind == input_kind::PLACE && want.accepted);
+            if kind == input_kind::PLACE {
+                placed += usize::from(want.accepted);
+                refused += usize::from(!want.accepted);
+                if let Some(&(_, off)) = powered_requests.iter().find(|(on, _)| *on == arg)
+                    && want.accepted
+                {
+                    placed_powered += 1;
+                    assert_eq!(direct.get_state(pos).0 as u32, off, "tick {t} {input:?}");
+                }
+            }
             unimplemented += usize::from(want.status == Status::UNIMPLEMENTED);
         }
         assert_eq!(changes(h).unwrap(), drain(&mut direct), "tick {t}");
         assert_eq!(rse_game_time(h), direct.game_time(), "tick {t}");
     }
     assert_eq!(rse_game_time(h), 400);
-    // 列が素通りしていない (置けた入力も、規則の無い要求も、どちらも通った)。
+    // 列が素通りしていない: 置けた入力も、置けずに 0 を返した入力も、入った状態の要求を切れて置いた入力も通った。
+    // 既定の組み立てでは、状態表の種類 (空気・石・3 素子) は全部に置いた時の規則があるので、UNIMPLEMENTED は立たない。
+    // 規則の無い種類で UNIMPLEMENTED が立つことは、族を外した組み立ての試験 (rse-engine の lib.rs) が見る。
     assert!(placed > 50, "{placed}");
-    assert!(unimplemented > 5, "{unimplemented}");
+    assert!(refused > 50, "{refused}");
+    assert!(placed_powered > 5, "{placed_powered}");
+    assert_eq!(unimplemented, 0);
     assert_eq!(rse_world_free(h), 0);
 }
