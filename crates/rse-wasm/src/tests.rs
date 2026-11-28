@@ -687,8 +687,9 @@ fn place_and_break_arguments_are_checked() {
 }
 
 // 置く前に rse_load と同じ確かめ (can_set_all_raw) で、高さの外と格子の枠の外を断る (PR #16 の承認の 2)。
-// rse-core を直に呼ぶと、高さの外は、置いた時の状態と支えの口を呼んでから書き込みが断るので 0 (規則の無い種類なら
-// UNIMPLEMENTED。今の状態表には無い)、格子の枠の外は書き込みまで進んで SAFETY になる。
+// rse-core を直に呼ぶと、格子の枠の外は書き込みまで進んで SAFETY になる。高さの外は、規則のある種類なら
+// 置いた時の状態と支えの口を呼んでから書き込みが断るので 0 になる (規則の無い種類なら、置いた時の状態の口の答えで
+// UNIMPLEMENTED を立てて戻る。今の状態表には無い)。
 // 窓口は OUT_OF_WORLD を返し、SAFETY を立てず、世界も格子も変えない。壊すは範囲を確かめず、同じ所でも 0。
 #[test]
 fn place_outside_the_world_is_refused_before_the_engine() {
