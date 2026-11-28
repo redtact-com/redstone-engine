@@ -150,7 +150,7 @@ export class RustWorld {
    * (ダストの形は V06 §4.3・§4.4、ランプの lit は V11 §4.1)。
    *
    * - state は置くブロックと、プレイヤーが選ぶ値 (レバーの face と facing) を運ぶ。ダストとランプは、どの状態を渡しても同じ
-   *   (既定の状態でよい)。レバーの powered は偽にする (真だと UNIMPLEMENTED が返る)。
+   *   (既定の状態でよい)。レバーの powered は偽にする (真だと UNIMPLEMENTED が返る。UNVERIFIED: redstone-sim#446 の質問 2)。
    * - 置き換えられない所 (空気でない所)・支えの無い所には、何もせずに 0 を返す (実機でも何も起きない)。
    * - 高さの外・格子の枠の外は、何もせずに EngineError (OUT_OF_WORLD) を投げる。表の外の StateId と空気は ARGUMENT。
    * @param state StateId。0〜0xFFFF の整数でなければ、wasm を呼ばずに RangeError
