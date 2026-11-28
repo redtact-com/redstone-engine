@@ -18,14 +18,15 @@
  * viewRef.current?.applyChanges(list)
  * ```
  *
- * - engine-js と @redstone/sim に依らない。board には型だけ依ってよい (今は窓口の型を src/types.ts に置き、6 本目で board へ移す)。
+ * - engine-js と @redstone/sim に依らない。board には型だけ依る。盤面・変化・押した時の扱いの型 (`Board`・`CellChange`・
+ *   `PickRoleFn` ほか) は board から読み、ここでは描く側の物 (`ApplyResult` ほか) だけを書き出す (#14)。
  *   窓口 (props・命令の口・書き出す型) に deepslate の型を出さない
  * - 押せるかの意味は持たない。アプリが `pickRole` で渡す (素通りの一覧と「一覧に無い物は遮る」だけを持つ)
  * - テクスチャとモデルは同梱しない。実行時に misode/mcmeta と PrismarineJS/minecraft-assets から取る
  *   (raw.githubusercontent.com → cdn.jsdelivr.net。docs/ip-policy.md §2)。取れなければ単色で描く
  */
 
-export type { ApplyResult, Board, BoardBounds, CellChange, PickRole, PickRoleFn, Pos3 } from './types'
+export type { ApplyResult } from './types'
 
 export { IsometricView } from './IsometricView'
 export type { IsometricViewProps, IsometricViewHandle, CameraState, CameraInput } from './IsometricView'
