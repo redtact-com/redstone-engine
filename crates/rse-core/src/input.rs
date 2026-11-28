@@ -13,7 +13,7 @@
 //! # 置く (プレイヤーの設置。V04 §4.13)
 //!
 //! 確かめを全部済ませてから、1 回だけ書く。確かめの間は世界を書かず、フックも呼ばない。
-//! この節で「手順 N」とだけ書いた物は、V04 §4.13 の BlockItem#place の手順の番号。書き込み (Level.setBlock) の
+//! この節で「手順 N」とだけ書いた物は、V04 §4.13 の BlockItem.place の手順の番号。書き込み (Level.setBlock) の
 //! 中の手順は「書き込みの手順 N」(V04 §4.1) と書く。
 //!
 //! 1. 置く先の今の状態が置き換え可能か (手順 2。V05 §4.7.1。縦切りの表では空気だけ)。
@@ -40,10 +40,12 @@
 //!
 //! 範囲の外の扱い:
 //!
-//! - 高さの外も、読むと空気 (置き換え可能) なので、1〜3 は走り、2 と 3 の口も呼ばれる。規則の無い種類なら
-//!   UNIMPLEMENTED が立つ。断るのは 4 で、書き込みの手順 1 (高さの確かめ。V04 §4.1) が何もせずに偽を返す。
-//!   実機も同じ順で、範囲の外は void_air (置き換え可能) と読まれ、置く状態と支えを決めてから書き込みで断る
-//!   (V04 §4.13 の「書き込みが偽を返した時」)。
+//! - 高さの外も、読むと空気 (置き換え可能) なので、1 を通って 2 の口が呼ばれる。その先は種類で分かれる。
+//!   - 規則のある種類: 2 と 3 の口を呼んでから、4 で書き込みの手順 1 (高さの確かめ。V04 §4.1) が、何もせずに
+//!     偽を返す。状態コードは立たない。
+//!   - 規則の無い種類: 2 の口の答えで UNIMPLEMENTED を立てて戻る。3 の口も書き込みも通らない (高さの中と同じ)。
+//! - 実機も同じ順で、範囲の外は void_air (置き換え可能) と読まれ、置く状態と支えを決めてから書き込みで断る
+//!   (V04 §4.13 の「書き込みが偽を返した時」)。高さの上の外も下の外も同じである。
 //! - 格子の枠の外は、4 の書き込みまで進んで SAFETY が立つ (実機なら書ける)。wasm の窓口は、置く前に断る。
 //!
 //! # 壊す (プレイヤーの破壊。V04 §4.14)
@@ -97,10 +99,10 @@ pub enum Input {
         state: StateId,
         strict: bool,
     },
-    /// 置く (プレイヤーの設置。V01 §4.10)。
-    /// `state` は置くブロックと、プレイヤーが選ぶ値を運ぶ。周りで決まる値は、置いた時の規則が決める。
+    /// 置く (プレイヤーの設置。V01 §4.10・V04 §4.13)。
+    /// `state` は置くブロックと、プレイヤーの操作で決まる値を運ぶ。周りで決まる値は、置いた時の規則が決める。
     Place { pos: Pos, state: StateId },
-    /// 壊す (プレイヤーの破壊。V01 §4.10)。
+    /// 壊す (プレイヤーの破壊。V01 §4.10・V04 §4.14)。
     Break { pos: Pos },
 }
 
@@ -609,55 +611,65 @@ mod tests {
                 status: Status::SAFETY
             }
         );
-        // 高さの外へ置くのは、書き込みの手順 1 が断る。読むと空気 (置き換え可能) なので、その前に 2 つの口は
-        // 呼ばれる (実機も、置く状態と支えを決めてから書き込みで断る。V04 §4.13)。規則があれば状態コードは立たない。
-        let high = Pos::new(0, 320, 0);
-        lv.rules.asked.borrow_mut().clear();
-        let out = lv.input(
-            A,
-            Input::Place {
-                pos: high,
+        // 高さの外へ置くのは、上の外も下の外も、書き込みの手順 1 が断る。読むと空気 (置き換え可能) なので、
+        // 規則のある種類は、その前に 2 つの口を呼ぶ (実機も、置く状態と支えを決めてから書き込みで断る。V04 §4.13)。
+        // 状態コードは立たない。規則の無い種類は、置いた時の状態の口の答えで UNIMPLEMENTED を立てて戻り、
+        // 支えの口も書き込みも通らない。
+        for y in [320, -65] {
+            let out_of_height = Pos::new(0, y, 0);
+            let place_stone = Input::Place {
+                pos: out_of_height,
                 state: stone,
-            },
-        );
-        assert_eq!(
-            out,
-            InputOutcome {
-                accepted: false,
-                status: Status::OK
-            }
-        );
-        assert_eq!(
-            *lv.rules.asked.borrow(),
-            [
-                Asked::Placement {
-                    pos: high,
+            };
+            lv.rules.asked.borrow_mut().clear();
+            let out = lv.input(A, place_stone);
+            assert_eq!(
+                out,
+                InputOutcome {
+                    accepted: false,
+                    status: Status::OK
+                },
+                "y={y}"
+            );
+            assert_eq!(
+                *lv.rules.asked.borrow(),
+                [
+                    Asked::Placement {
+                        pos: out_of_height,
+                        requested: stone,
+                        hooks_before: 0
+                    },
+                    Asked::Survive {
+                        pos: out_of_height,
+                        state: stone,
+                        hooks_before: 0
+                    },
+                ],
+                "y={y}"
+            );
+            lv.rules
+                .placement
+                .insert(out_of_height, Placement::Unimplemented);
+            lv.rules.asked.borrow_mut().clear();
+            let out = lv.input(A, place_stone);
+            assert_eq!(
+                out,
+                InputOutcome {
+                    accepted: false,
+                    status: Status::UNIMPLEMENTED
+                },
+                "y={y}"
+            );
+            assert_eq!(
+                *lv.rules.asked.borrow(),
+                [Asked::Placement {
+                    pos: out_of_height,
                     requested: stone,
                     hooks_before: 0
-                },
-                Asked::Survive {
-                    pos: high,
-                    state: stone,
-                    hooks_before: 0
-                },
-            ]
-        );
-        // 規則の無い種類なら、高さの外でも UNIMPLEMENTED が立つ (書かない)。
-        lv.rules.placement.insert(high, Placement::Unimplemented);
-        let out = lv.input(
-            A,
-            Input::Place {
-                pos: high,
-                state: stone,
-            },
-        );
-        assert_eq!(
-            out,
-            InputOutcome {
-                accepted: false,
-                status: Status::UNIMPLEMENTED
-            }
-        );
+                }],
+                "y={y}"
+            );
+        }
         assert_eq!(lv.rules.log, []);
         assert!(lv.drain_changes().is_empty());
     }
