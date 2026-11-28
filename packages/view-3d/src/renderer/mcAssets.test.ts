@@ -1,0 +1,395 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+
+/**
+ * テクスチャと JSON の取り方 (redstone-sim#395)。fetch を差し替え、モジュールの状態は毎回作り直す。
+ *
+ * - 既定はパック無し。mcmeta と PrismarineJS だけを取る (#11)
+ * - パックを渡した時の振る舞い (下の 3 つ) は redstone-sim と同じ
+ *
+ * - パックへは bundle の一覧にあるものだけ取りに行く (一覧に無いと 200 + index.html の無駄だった)
+ * - 取ったものはページ内で覚える。「届かない」は覚えない
+ * - 同時に呼んでも 1 回しか取らない
+ */
+
+type Assets = typeof import('./mcAssets')
+
+const PIN = 'a95e329c161b7fdd19de9f78d0a91c45da57d921'
+/** パックの基点。既定はパック無しなので、パックの振る舞いを見るテストは明示して渡す (#11) */
+const PACK = '/resourcepack'
+const BUNDLE_URL = '/resourcepack/bundle.json'
+const PACK_TEX = '/resourcepack/assets/minecraft/textures/'
+const MCMETA_RAW = 'https://raw.githubusercontent.com/misode/mcmeta/1.21.4-assets/assets/minecraft/textures/'
+const MCMETA_JSD = 'https://cdn.jsdelivr.net/gh/misode/mcmeta@1.21.4-assets/assets/minecraft/textures/'
+const PRISMARINE_RAW = `https://raw.githubusercontent.com/PrismarineJS/minecraft-assets/${PIN}/data/1.21.4/`
+const PRISMARINE_JSD = `https://cdn.jsdelivr.net/gh/PrismarineJS/minecraft-assets@${PIN}/data/1.21.4/`
+
+type Handler = (url: string) => Response | Promise<Response>
+
+function stubFetch(handler: Handler): string[] {
+  const calls: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input)
+    calls.push(url)
+    return handler(url)
+  }))
+  return calls
+}
+
+const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200 })
+const png = () => new Response(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), {
+  status: 200, headers: { 'content-type': 'image/png' },
+})
+/** Cloudflare Pages / Vite が存在しないパスに返すもの */
+const spaFallback = () => new Response('<!doctype html>', {
+  status: 200, headers: { 'content-type': 'text/html' },
+})
+const notFound = () => new Response('Not Found', { status: 404 })
+const networkError = (): never => { throw new TypeError('Failed to fetch') }
+
+const BUNDLE = {
+  models: { 'block/lever/off': { parent: 'block/lever/base' } },
+  blockstates: { lever: { variants: {} } },
+  textures: ['block/lever/base', 'entity/chest/trapped'],
+}
+
+/** パック内に無いものは SPA のフォールバック、バニラは全部ある、という本番に近い応答 */
+function production(bundle: unknown = BUNDLE): Handler {
+  return (url) => {
+    if (url === BUNDLE_URL) return bundle === null ? notFound() : json(bundle)
+    if (url.startsWith(PACK_TEX)) {
+      const path = url.slice(PACK_TEX.length).replace(/\.png$/, '')
+      return BUNDLE.textures.includes(path) ? png() : spaFallback()
+    }
+    if (url.startsWith('/resourcepack/')) return spaFallback()
+    return png()
+  }
+}
+
+let assets: Assets
+
+beforeEach(async () => {
+  vi.resetModules()
+  assets = await import('./mcAssets')
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+/** 画像の切り出し・検証は node に無いので、描ける画像として振る舞う最小の代役を置く */
+function stubImageDecoding(opts: { broken?: boolean } = {}) {
+  class FakeImage {
+    width = 16
+    height = 16
+    onload: (() => void) | null = null
+    onerror: (() => void) | null = null
+    set src(_url: string) { queueMicrotask(() => this.onload?.()) }
+  }
+  vi.stubGlobal('Image', FakeImage)
+  vi.stubGlobal('createImageBitmap', vi.fn(async () => {
+    if (opts.broken) throw new Error('broken image')
+    return { width: 16, height: 16, close() {} }
+  }))
+}
+
+/** バニラの取得先 (mcmeta と PrismarineJS を、raw か jsDelivr から) */
+const VANILLA = /^https:\/\/(raw\.githubusercontent\.com\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)\/|cdn\.jsdelivr\.net\/gh\/(misode\/mcmeta|PrismarineJS\/minecraft-assets)@)/
+
+describe('既定はパック無し (#11)', () => {
+  it('既定で fetch するのは mcmeta と PrismarineJS だけ (bundle・パックの JSON・パックのテクスチャを取りに行かない)', async () => {
+    stubImageDecoding()
+    // raw が落ちていて jsDelivr へ回る時も、パックへは行かない
+    const calls = stubFetch(url => {
+      if (url.startsWith('https://raw.')) return networkError()
+      return url.endsWith('.json') ? json({ stone: {} }) : png()
+    })
+    await assets.preloadPackBundle()
+    expect(await assets.fetchPackJson('blockstates/lever.json')).toBeNull()
+    expect(await assets.fetchPackJson('models/block/lever/off.json')).toBeNull()
+    expect((await assets.fetchTextureBlob('block/stone')).kind).toBe('ok')
+    expect((await assets.fetchTexture('entity/chest/trapped')).kind).toBe('ok')
+    expect(await assets.getBlockStates()).toEqual({ stone: {} })
+    expect(await assets.getBlockModels()).toEqual({ stone: {} })
+    expect(calls.length).toBeGreaterThan(0)
+    expect(calls.filter(u => !VANILLA.test(u)), 'パックか、知らない所へ取りに行っている').toEqual([])
+  })
+
+  it('パック無しの時は mcmeta (raw) から取り、bundle を待たない', async () => {
+    const calls = stubFetch(production())
+    expect((await assets.fetchTextureBlob('block/stone')).kind).toBe('ok')
+    expect(calls).toEqual([`${MCMETA_RAW}block/stone.png`])
+  })
+
+  it('パック無しで覚えたテクスチャを、パックを渡した時に使わない (パックの物が先に試される)', async () => {
+    stubImageDecoding()
+    const calls = stubFetch(production())
+    await assets.fetchTexture('entity/chest/trapped')
+    await assets.fetchTexture('entity/chest/trapped', PACK)
+    await assets.fetchTexture('entity/chest/trapped')
+    expect(calls).toEqual([
+      `${MCMETA_RAW}entity/chest/trapped.png`,
+      BUNDLE_URL, `${PACK_TEX}entity/chest/trapped.png`,
+    ])
+  })
+})
+
+describe('buildResources の取り方 (#11)', () => {
+  /** 画像を描く所 (canvas) の最小の代役。アトラスを組むのに使う */
+  function stubCanvas() {
+    const ctx = {
+      imageSmoothingEnabled: true,
+      fillStyle: '',
+      fillRect() {},
+      drawImage() {},
+      getImageData: (_x: number, _y: number, w: number, h: number) => ({ width: w, height: h, data: new Uint8ClampedArray(w * h * 4) }),
+    }
+    vi.stubGlobal('document', { createElement: () => ({ width: 0, height: 0, getContext: () => ctx }) })
+  }
+
+  /** blockstates と models の JSON (手で書いた最小の物) と、テクスチャ。パックの物は SPA の 200 + index.html */
+  function vanillaAndPack(): Handler {
+    return (url) => {
+      if (url.endsWith('/blocks_states.json')) return json({ stone: { variants: { '': { model: 'block/stone' } } } })
+      if (url.endsWith('/blocks_models.json')) return json({ stone: { textures: { all: 'block/stone' }, elements: [] } })
+      if (url === BUNDLE_URL) return json(BUNDLE)
+      if (url.startsWith('/resourcepack/')) return spaFallback()
+      return png()
+    }
+  }
+
+  it('buildResources も、既定では mcmeta と PrismarineJS だけを取る (パックの bundle・JSON・テクスチャへ行かない)', async () => {
+    stubImageDecoding()
+    stubCanvas()
+    const calls = stubFetch(vanillaAndPack())
+    const { buildResources } = await import('./buildResources')
+    const built = await buildResources(['minecraft:stone', 'stone'])
+    expect(built.assets).toBe('full')
+    expect(calls).toContain(`${PRISMARINE_RAW}blocks_states.json`)
+    expect(calls).toContain(`${MCMETA_RAW}block/stone.png`)
+    expect(calls.filter(u => !VANILLA.test(u)), 'パックか、知らない所へ取りに行っている').toEqual([])
+  })
+
+  it('buildResources にパックを渡した時だけ、bundle とパックを試す', async () => {
+    stubImageDecoding()
+    stubCanvas()
+    const calls = stubFetch(vanillaAndPack())
+    const { buildResources } = await import('./buildResources')
+    await buildResources(['stone'], PACK)
+    expect(calls).toContain(BUNDLE_URL)
+  })
+})
+
+describe('パックへは bundle の一覧にあるものだけ取りに行く (redstone-sim#395)', () => {
+  it('一覧に無いテクスチャはパックへ行かず mcmeta (raw) から取る', async () => {
+    const calls = stubFetch(production())
+    const r = await assets.fetchTextureBlob('block/stone', PACK)
+    expect(r.kind).toBe('ok')
+    expect(calls).toEqual([BUNDLE_URL, `${MCMETA_RAW}block/stone.png`])
+  })
+
+  it('パックがバニラのパスで上書きしているトラップチェストは、今までどおりパックから取る', async () => {
+    const calls = stubFetch(production())
+    expect((await assets.fetchTextureBlob('entity/chest/trapped', PACK)).kind).toBe('ok')
+    expect(calls).toEqual([BUNDLE_URL, `${PACK_TEX}entity/chest/trapped.png`])
+  })
+
+  it('textures の無い古い bundle なら、今までどおり全部パックを試す', async () => {
+    const { textures: _omit, ...old } = BUNDLE
+    const calls = stubFetch(production(old))
+    expect((await assets.fetchTextureBlob('block/stone', PACK)).kind).toBe('ok')
+    expect(calls).toEqual([BUNDLE_URL, `${PACK_TEX}block/stone.png`, `${MCMETA_RAW}block/stone.png`])
+  })
+
+  it('bundle が取れなければ、今までどおり全部パックを試す', async () => {
+    const calls = stubFetch(production(null))
+    expect((await assets.fetchTextureBlob('block/stone', PACK)).kind).toBe('ok')
+    expect(calls).toEqual([BUNDLE_URL, `${PACK_TEX}block/stone.png`, `${MCMETA_RAW}block/stone.png`])
+  })
+
+  it('fetchPackJson は、bundle が読めたら bundle に無いものを fetch しない', async () => {
+    const calls = stubFetch(production())
+    expect(await assets.fetchPackJson('models/block/lever/off.json', PACK)).toEqual({ parent: 'block/lever/base' })
+    expect(await assets.fetchPackJson('blockstates/lever.json', PACK)).toEqual({ variants: {} })
+    expect(await assets.fetchPackJson('blockstates/stone.json', PACK)).toBeNull()
+    expect(await assets.fetchPackJson('models/block/cube_all.json', PACK)).toBeNull()
+    expect(calls).toEqual([BUNDLE_URL])
+  })
+
+  it('fetchPackJson は、bundle が無ければ今までどおり個別に取る', async () => {
+    const calls = stubFetch(production(null))
+    expect(await assets.fetchPackJson('blockstates/stone.json', PACK)).toBeNull()
+    expect(calls).toEqual([BUNDLE_URL, '/resourcepack/assets/minecraft/blockstates/stone.json'])
+  })
+
+  it('bundle は同時に呼んでも 1 回だけ取り、どの呼び出しも読み込みを待つ', async () => {
+    const calls = stubFetch(production())
+    const first = assets.preloadPackBundle(PACK)
+    // 以前は 2 つ目の呼び出しが読み込みを待たずに抜けていた (同じ Promise を返せば待てる)
+    const second = assets.preloadPackBundle(PACK)
+    expect(second).toBe(first)
+    await second
+    expect(await assets.fetchPackJson('blockstates/lever.json', PACK)).toEqual({ variants: {} })
+    expect(calls).toEqual([BUNDLE_URL])
+  })
+})
+
+describe('テクスチャの取得先の順番 (redstone-sim#395)', () => {
+  it('mcmeta が全部 404 なら PrismarineJS の blocks/ を試す (block/ のみ)', async () => {
+    const calls = stubFetch(url => {
+      if (url === BUNDLE_URL) return json(BUNDLE)
+      if (url.startsWith(PRISMARINE_JSD)) return png()
+      return notFound()
+    })
+    expect((await assets.fetchTextureBlob('block/foo', PACK)).kind).toBe('ok')
+    expect(calls).toEqual([
+      BUNDLE_URL,
+      `${MCMETA_RAW}block/foo.png`, `${MCMETA_JSD}block/foo.png`,
+      `${PRISMARINE_RAW}blocks/foo.png`, `${PRISMARINE_JSD}blocks/foo.png`,
+    ])
+  })
+
+  it('どこにも無ければ「無い」(市松で描く)。entity/ は PrismarineJS を試さない', async () => {
+    const calls = stubFetch(url => (url === BUNDLE_URL ? json(BUNDLE) : notFound()))
+    expect(await assets.fetchTextureBlob('entity/foo', PACK)).toEqual({ kind: 'missing' })
+    expect(calls.some(u => u.includes('PrismarineJS'))).toBe(false)
+  })
+
+  it('mcmeta に届かなければ「届かない」(その面を単色で描く)。PrismarineJS へは進まない', async () => {
+    const calls = stubFetch(url => (url === BUNDLE_URL ? json(BUNDLE) : networkError()))
+    expect(await assets.fetchTextureBlob('block/stone', PACK)).toEqual({ kind: 'unreachable' })
+    expect(calls.some(u => u.includes('PrismarineJS'))).toBe(false)
+  })
+
+  it('パックの取得が通信で失敗していたら、バニラに無くても「無い」とは言わない', async () => {
+    stubFetch(url => {
+      if (url === BUNDLE_URL) return json(BUNDLE)
+      if (url.startsWith(PACK_TEX)) return networkError()
+      return notFound()
+    })
+    expect(await assets.fetchTextureBlob('block/lever/base', PACK)).toEqual({ kind: 'unreachable' })
+  })
+})
+
+describe('取得したテクスチャを覚える (redstone-sim#395)', () => {
+  it('同時に 3 回呼んでも fetch は 1 回だけ。2 回目の作り直しでは取らない', async () => {
+    stubImageDecoding()
+    const calls = stubFetch(production())
+    const rs = await Promise.all([1, 2, 3].map(() => assets.fetchTexture('block/stone', PACK)))
+    expect(rs.map(r => r.kind)).toEqual(['ok', 'ok', 'ok'])
+    expect(calls.filter(u => u.endsWith('block/stone.png'))).toHaveLength(1)
+
+    calls.length = 0
+    expect((await assets.fetchTexture('block/stone', PACK)).kind).toBe('ok')
+    expect(calls).toEqual([])
+  })
+
+  it('取ったものは image/png にそろえて返す (CDN が octet-stream で返しても描けるように)', async () => {
+    stubImageDecoding()
+    stubFetch(url => (url === BUNDLE_URL ? json(BUNDLE)
+      : new Response(new Uint8Array([1, 2, 3]), { status: 200, headers: { 'content-type': 'application/octet-stream' } })))
+    const r = await assets.fetchTexture('block/stone', PACK)
+    expect(r.kind === 'ok' && r.blob.type).toBe('image/png')
+  })
+
+  it('「無い」は覚える (固定した版なので変わらない)', async () => {
+    const calls = stubFetch(url => (url === BUNDLE_URL ? json(BUNDLE) : notFound()))
+    expect(await assets.fetchTexture('entity/foo', PACK)).toEqual({ kind: 'missing' })
+    calls.length = 0
+    expect(await assets.fetchTexture('entity/foo', PACK)).toEqual({ kind: 'missing' })
+    expect(calls).toEqual([])
+  })
+
+  it('壊れた画像は「無い」として扱う (市松)', async () => {
+    stubImageDecoding({ broken: true })
+    stubFetch(production())
+    expect(await assets.fetchTexture('block/stone', PACK)).toEqual({ kind: 'missing' })
+  })
+
+  it('全部届かない →「届かない」を返し、次の呼び出しでもう一度 fetch する', async () => {
+    stubImageDecoding()
+    const calls = stubFetch(url => (url === BUNDLE_URL ? json(BUNDLE) : networkError()))
+    expect(await assets.fetchTexture('block/stone', PACK)).toEqual({ kind: 'unreachable' })
+    expect(calls.length).toBeGreaterThan(1)
+
+    // 戻ったら取れる
+    const again = stubFetch(production())
+    expect((await assets.fetchTexture('block/stone', PACK)).kind).toBe('ok')
+    expect(again.filter(u => u.endsWith('block/stone.png')).length).toBe(1)
+  })
+})
+
+describe('blocks_states / blocks_models (redstone-sim#395)', () => {
+  it('同時に 3 回呼んでも JSON は 1 回だけ取る', async () => {
+    const calls = stubFetch(() => json({ stone: {} }))
+    const rs = await Promise.all([assets.getBlockStates(), assets.getBlockStates(), assets.getBlockStates()])
+    expect(rs).toEqual([{ stone: {} }, { stone: {} }, { stone: {} }])
+    expect(calls).toEqual([`${PRISMARINE_RAW}blocks_states.json`])
+    await assets.getBlockStates()
+    expect(calls).toHaveLength(1)
+  })
+
+  it('raw に届かなければ jsDelivr から取る', async () => {
+    const calls = stubFetch(url => (url.startsWith('https://raw.') ? networkError() : json({ stone: {} })))
+    expect(await assets.getBlockModels()).toEqual({ stone: {} })
+    expect(calls).toEqual([`${PRISMARINE_RAW}blocks_models.json`, `${PRISMARINE_JSD}blocks_models.json`])
+  })
+
+  it('どこからも取れなければ null (単色で描く)。覚えずに次でまた取りに行く', async () => {
+    stubFetch(() => networkError())
+    expect(await assets.getBlockStates()).toBeNull()
+    const again = stubFetch(() => json({ stone: {} }))
+    expect(await assets.getBlockStates()).toEqual({ stone: {} })
+    expect(again).toEqual([`${PRISMARINE_RAW}blocks_states.json`])
+  })
+
+  it('200 で HTML が返っても JSON として受け取らない', async () => {
+    stubFetch(url => (url.startsWith('https://raw.') ? spaFallback() : json({ stone: {} })))
+    expect(await assets.getBlockStates()).toEqual({ stone: {} })
+  })
+})
+
+describe('リソースパックの基点 URL (redstone-sim#434)', () => {
+  const OTHER = 'https://example.test/kit/pack'
+
+  it('基点を渡すと bundle・JSON・テクスチャをその下から取る (末尾の / は無視)', async () => {
+    const { textures: _omit, ...old } = BUNDLE
+    const calls = stubFetch(url => {
+      if (url === `${OTHER}/bundle.json`) return json(old)
+      if (url.startsWith(`${OTHER}/assets/minecraft/textures/`)) return png()
+      return notFound()
+    })
+    expect(await assets.fetchPackJson('blockstates/lever.json', `${OTHER}/`)).toEqual({ variants: {} })
+    expect((await assets.fetchTextureBlob('block/stone', OTHER)).kind).toBe('ok')
+    expect(calls).toEqual([`${OTHER}/bundle.json`, `${OTHER}/assets/minecraft/textures/block/stone.png`])
+  })
+
+  it('基点ごとに別々に覚える (ある基点で覚えた物を別の基点に使わない)', async () => {
+    stubImageDecoding()
+    const calls = stubFetch(url => {
+      if (url === BUNDLE_URL) return json(BUNDLE)
+      if (url === `${OTHER}/bundle.json`) return json({ ...BUNDLE, blockstates: { lever: { variants: { other: 1 } } } })
+      return png()
+    })
+    expect(await assets.fetchPackJson('blockstates/lever.json', PACK)).toEqual({ variants: {} })
+    expect(await assets.fetchPackJson('blockstates/lever.json', OTHER)).toEqual({ variants: { other: 1 } })
+    expect(await assets.fetchPackJson('blockstates/lever.json', PACK)).toEqual({ variants: {} })
+    // テクスチャも基点ごと。パックにある物はそれぞれの基点から 1 回ずつ取る
+    await assets.fetchTexture('entity/chest/trapped', PACK)
+    await assets.fetchTexture('entity/chest/trapped', OTHER)
+    await assets.fetchTexture('entity/chest/trapped', OTHER)
+    expect(calls).toEqual([
+      BUNDLE_URL, `${OTHER}/bundle.json`,
+      `${PACK_TEX}entity/chest/trapped.png`,
+      `${OTHER}/assets/minecraft/textures/entity/chest/trapped.png`,
+    ])
+  })
+})
+
+describe('パレットのアイコンの置き場 (redstone-sim#276)', () => {
+  it('MCMETA_BASE の値は変えない (アイコンはミラーに載せていない)', () => {
+    expect(assets.MCMETA_BASE)
+      .toBe('https://raw.githubusercontent.com/misode/mcmeta/1.21.4-assets/assets/minecraft')
+  })
+})

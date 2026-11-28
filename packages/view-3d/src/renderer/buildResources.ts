@@ -1,0 +1,292 @@
+import {
+  BlockDefinition,
+  BlockModel,
+  TextureAtlas,
+  type Resources,
+  type BlockModelProvider,
+} from 'deepslate/render'
+import { Identifier } from 'deepslate/core'
+import { getBlockFlags } from './blockFlags'
+import { getBlockStates, getBlockModels, fetchTexture, fetchPackJson, preloadPackBundle } from './mcAssets'
+import { collectTexturePaths, addSpecialRendererTextures } from './texturePaths'
+import { buildAtlas32 } from './atlasUtils'
+import { buildSolidResources, solidColor } from './solidResources'
+
+const _loggedMissing = new Set<string>()
+
+// ── パックのblockstateからモデルパスを収集するヘルパー ──────────
+
+function collectModelRefsFromState(obj: unknown): string[] {
+  const refs: string[] = []
+  function walk(o: unknown) {
+    if (!o || typeof o !== 'object') return
+    if (Array.isArray(o)) { o.forEach(walk); return }
+    const rec = o as Record<string, unknown>
+    if (typeof rec['model'] === 'string') {
+      refs.push((rec['model'] as string).replace('minecraft:', ''))
+    }
+    Object.values(rec).forEach(walk)
+  }
+  walk(obj)
+  return refs
+}
+
+// ── パックのblockstate/modelをPrismarineJS束にオーバーレイ ────────
+
+async function overlayPackData(
+  blockNames: string[],
+  statesJson: Record<string, unknown>,
+  modelsJson: Record<string, unknown>,
+  packUrl: string,
+): Promise<void> {
+  const names = [...new Set(blockNames.map(n => n.replace('minecraft:', '')))]
+
+  // blockstateをパックから取得し、モデル参照を収集
+  const allModelRefs = new Set<string>()
+  await Promise.all(names.map(async (name) => {
+    const packState = await fetchPackJson(`blockstates/${name}.json`, packUrl)
+    if (!packState) return
+    statesJson[name] = packState
+    collectModelRefsFromState(packState).forEach(ref => allModelRefs.add(ref))
+  }))
+
+  // パックモデルを親チェーンを辿りながら順次ロード
+  // （親が見つからない場合はPrismarineJS側で解決される）
+  const loaded = new Set<string>()
+  const queue = [...allModelRefs]
+
+  while (queue.length > 0) {
+    // **同じ ref を 1 度しか取らない** (redstone-sim#276)。親 ref は下の push で重複して積まれるので、
+    // ここで落とさないと同一 URL への並列 fetch が大量に走る
+    // (実測: 358 本のうちユニークは 264 本、94 本が同じ波の中の重複だった)
+    const batch = [...new Set(queue.splice(0, queue.length))].filter(ref => !loaded.has(ref))
+    if (batch.length === 0) break
+
+    batch.forEach(ref => loaded.add(ref))
+
+    await Promise.all(batch.map(async (modelRef) => {
+      // modelRef: "block/lever/off" → file: "models/block/lever/off.json"
+      const filePath = modelRef.replace(/^block\//, '')
+      const packModel = await fetchPackJson(`models/block/${filePath}.json`, packUrl)
+      if (!packModel) return
+
+      // フルパスキーで登録（getBlockModel の id.path と一致させる）
+      modelsJson[modelRef] = packModel
+
+      // 親チェーンを追跡
+      const parent = (packModel as Record<string, unknown>)['parent']
+      if (typeof parent === 'string') {
+        const parentRef = parent.replace('minecraft:', '')
+        if (!loaded.has(parentRef)) queue.push(parentRef)
+      }
+    }))
+  }
+}
+
+/**
+ * テクスチャがどこまで取れたか (redstone-sim#395)。
+ * - `full`: 全部取れた (どこにも無いものは今までどおり市松)
+ * - `partial`: 届かないテクスチャがあり、その面を単色で描いている
+ * - `solid`: blockstates / models の JSON が届かず、全ブロックを単色の立方体で描いている
+ */
+export type AssetState = 'full' | 'partial' | 'solid'
+
+export interface BuiltResources {
+  resources: Resources
+  assets: AssetState
+}
+
+/**
+ * @param packUrl リソースパックの基点 URL (redstone-sim#434)。**省くとパック無し** (#11)。
+ *   パックの bundle・JSON・テクスチャを 1 つも取りに行かず、mcmeta と PrismarineJS だけから作る
+ */
+export async function buildResources(blockNames: string[], packUrl?: string): Promise<BuiltResources> {
+  const [statesJsonBase, modelsJsonBase] = await Promise.all([
+    getBlockStates(),
+    getBlockModels(),
+    // パック JSON を 1 本にまとめた bundle.json を**並行して**先読みする (redstone-sim#276)。
+    // 取れなければ個別取得にフォールバックするので、失敗しても壊れない。パック無しなら何もしない
+    preloadPackBundle(packUrl),
+  ])
+
+  // JSON がどのミラーからも届かない → 全ブロックを単色の立方体で描く (redstone-sim#395)。
+  // 以前はここで例外になり、盤面がエラー表示になっていた (2D の編集画面も同じ部品なので編集もできなかった)
+  if (!statesJsonBase || !modelsJsonBase) {
+    return { resources: await buildSolidResources(blockNames), assets: 'solid' }
+  }
+
+  // キャッシュを汚染しないようシャローコピーを作成
+  const statesJson: Record<string, unknown> = { ...statesJsonBase }
+  const modelsJson: Record<string, unknown> = { ...modelsJsonBase }
+
+  // パックデータをオーバーレイ（パックにあるブロックのみ上書き）。パック無しなら飛ばす
+  if (packUrl !== undefined) await overlayPackData(blockNames, statesJson, modelsJson, packUrl)
+
+  // variant 必須プロパティの既定値 (redstone-sim#343)。盤面の文字列に書いていないプロパティを描画時に補う
+  const defaultProps = new Map<string, Record<string, string>>()
+
+  // 構造体のブロックの BlockDefinition を構築
+  const blockDefs = new Map<string, BlockDefinition>()
+  for (const fullName of blockNames) {
+    const name = fullName.replace('minecraft:', '')
+    if (statesJson[name]) {
+      try {
+        blockDefs.set(name, BlockDefinition.fromJson(statesJson[name]))
+        const defs = defaultPropsOf(statesJson[name])
+        if (Object.keys(defs).length > 0) defaultProps.set(name, defs)
+      } catch { /* skip */ }
+    }
+  }
+
+  // cube_mirrored は面の UV が [16,0,0,16]（U 反転）で deepslate が誤表示する。
+  // flatten 前に raw JSON を正常 [0,0,16,16] に書き換えてから BlockModel を構築する。
+  const patchedModelsJson = { ...modelsJson } as Record<string, unknown>
+  const cubeMirroredRaw = patchedModelsJson['cube_mirrored'] as
+    | { elements?: Array<{ faces?: Record<string, { uv?: number[] }> }> }
+    | undefined
+  if (cubeMirroredRaw?.elements) {
+    const patched = JSON.parse(JSON.stringify(cubeMirroredRaw)) as typeof cubeMirroredRaw
+    patched.elements?.forEach(elem => {
+      Object.values(elem.faces ?? {}).forEach(face => {
+        if (face.uv && face.uv[0] > face.uv[2]) {
+          ;[face.uv[0], face.uv[2]] = [face.uv[2], face.uv[0]]
+        }
+      })
+    })
+    patchedModelsJson['cube_mirrored'] = patched
+  }
+
+  // 全 BlockModel を構築（flatten で親チェーンを解決するため全量必要）
+  const blockModels = new Map<string, BlockModel>()
+  for (const [key, data] of Object.entries(patchedModelsJson)) {
+    try {
+      blockModels.set(key, BlockModel.fromJson(data))
+    } catch { /* skip */ }
+  }
+
+  // flatten: 親モデルからエレメント・テクスチャを継承させる
+  // パックモデルは "block/lever/off" キー、PrismarineJS モデルは "lever" キーで検索
+  const modelProvider: BlockModelProvider = {
+    getBlockModel(id: Identifier) {
+      const key = id.path.replace(/^block\//, '')
+      return blockModels.get(key) ?? blockModels.get(id.path) ?? null
+    },
+  }
+  for (const model of blockModels.values()) {
+    try { model.flatten(modelProvider) } catch { /* skip */ }
+  }
+
+  // 構造体のブロックが実際に使うテクスチャのみ収集
+  // statesJson・modelsJson にパックデータが含まれているため、
+  // パックブロックのカスタムテクスチャパスも自動的に収集される
+  // 並べ替えておく。以前はログ出力の中の sort() がこの配列を並べ替えていた (redstone-sim#395 でログを消した)
+  const uniqueBlockNames = [...new Set(blockNames.map(n => n.replace('minecraft:', '')))].sort()
+
+  const texturePaths = collectTexturePaths(
+    uniqueBlockNames.map(n => `minecraft:${n}`),
+    statesJson,
+    modelsJson,
+  )
+  addSpecialRendererTextures(texturePaths, uniqueBlockNames)
+
+  // テクスチャを並列フェッチ（パック (渡した時だけ) → mcmeta → PrismarineJS の順で試行）。
+  // 取得・先頭フレームの切り出し・image/png への正規化と検証は fetchTexture が行い、
+  // 結果をページ内で覚える (redstone-sim#395)。作り直しのときは取り直さない
+  const results = await Promise.all(
+    [...texturePaths].map(async (path) => [path, await fetchTexture(path, packUrl)] as const),
+  )
+  // アトラスのスロットは texturePaths の順に並ぶ (redstone-sim#395)。以前は取得が終わった順に並んで読み込むたびに変わり、
+  // テクセルの境目の画素が揺れていた (同じビルドを読み込み直すだけで最大 60 画素違った)
+  const validBlobs: Record<string, Blob> = {}
+  // 届かなかったテクスチャは、その面を単色で描く (redstone-sim#395)。
+  // どこにも無いもの (missing) は今までどおり市松にする。取りこぼし (redstone-sim#343) に気づけるように
+  const solids: Record<string, string> = {}
+  for (const [path, r] of results) {
+    if (r.kind === 'ok') validBlobs[`minecraft:${path}`] = r.blob
+    else if (r.kind === 'unreachable') solids[`minecraft:${path}`] = solidColor(path)
+  }
+
+  // deepslate の upperPowerOfTwo バグ (sqrt(N+1) が整数でないとアトラスが小さくなる) は、
+  // buildAtlas32 が幅を自前で計算するので影響を受けない (詳細は atlasUtils.ts の nextPow2)。
+  // 以前ここで呼んでいた水増しの padTextureBlobs は redstone-sim#276 で外し、redstone-sim#395 で関数ごと消した
+
+  // 32×32 スロットのカスタムアトラスを構築
+  // deepslate の fromBlobs は drawImage のソース rect を固定 16×16 にするため
+  // 32×32 テクスチャの下半分が欠落する。buildAtlas32 は全テクスチャを 32×32 スロットに
+  // 等倍描画し、UV 座標は deepslate 標準（スロットインデックス/幅）と同一なので互換性を保つ。
+  const AtlasCtor = TextureAtlas as unknown as new (
+    img: ImageData,
+    idMap: Record<string, [number, number, number, number]>,
+  ) => TextureAtlas
+  const atlas = await buildAtlas32(validBlobs, AtlasCtor, solids)
+
+  const resources: Resources = {
+    getBlockDefinition(id: Identifier) {
+      return blockDefs.get(id.path) ?? null
+    },
+    getBlockModel(id: Identifier) {
+      const key = id.path.replace(/^block\//, '')
+      return blockModels.get(key) ?? blockModels.get(id.path) ?? null
+    },
+    getTextureAtlas() {
+      return atlas.getTextureAtlas()
+    },
+    getTextureUV(id: Identifier) {
+      const uv = atlas.getTextureUV(id)
+      if (!_loggedMissing.has(id.toString()) && uv[0] === 0 && uv[1] === 0) {
+        _loggedMissing.add(id.toString())
+        console.warn('[getTextureUV] fallback for:', id.toString())
+      }
+      return uv
+    },
+    getPixelSize() {
+      return atlas.getPixelSize()
+    },
+    getBlockFlags(id: Identifier) {
+      return getBlockFlags(id.path)
+    },
+    getBlockProperties: () => null,
+    // **実装しないと variant 必須のブロックが消える** (redstone-sim#343)。下の defaultPropsOf 参照
+    getDefaultBlockProperties: (id: Identifier) =>
+      defaultProps.get(id.path.replace(/^block\//, '')) ?? null,
+  }
+  return { resources, assets: Object.keys(solids).length > 0 ? 'partial' : 'full' }
+}
+
+/**
+ * blockstate の variant キーから既定プロパティを組み立てる (redstone-sim#343)。
+ *
+ * 盤面の文字列がプロパティを省いていると (redstone-sim では sim が挙動に効かないプロパティを捨てていた)、
+ * `oak_log` の `axis` や `carved_pumpkin` の `facing` が無い。engine-js の `StateTable.name` は全部を書くので、
+ * 補うのはそれ以外の出どころの文字列だけになる。deepslate の variant 選択は
+ * **全プロパティ完全一致**なので、そのままでは**どれにも一致せず何も描かれない**
+ * (エラーにならないので気づけない。redstone-sim#234 で塀が消えたのと同じ症状)。
+ *
+ * `ChunkBuilder` は `getDefaultBlockProperties` で**足りないプロパティだけ**を補うので、
+ * ここで「その名前が取りうる値」を返せば、名前ごとの手書き表を持たずに全ブロックが救われる。
+ *
+ * 値の選び方: バニラの既定に近いものを優先する (縦置きの原木・北向き・雪なし)。
+ * 一覧に無ければ variant に最初に出てくる値を使う。
+ */
+const PREFERRED_VALUES = ['y', 'north', 'false', 'bottom', 'none', 'single', 'normal', '0']
+
+export function defaultPropsOf(stateJson: unknown): Record<string, string> {
+  const variants = (stateJson as { variants?: Record<string, unknown> } | null)?.variants
+  if (!variants) return {}
+  const seen = new Map<string, string[]>()
+  for (const key of Object.keys(variants)) {
+    if (key === '') return {}     // プロパティ不問の variant があるなら補う必要はない
+    for (const kv of key.split(',')) {
+      const [prop, value] = kv.split('=')
+      if (!prop || value === undefined) continue
+      const list = seen.get(prop) ?? []
+      if (!list.includes(value)) list.push(value)
+      seen.set(prop, list)
+    }
+  }
+  const out: Record<string, string> = {}
+  for (const [prop, values] of seen) {
+    out[prop] = values.find(v => PREFERRED_VALUES.includes(v)) ?? values[0]
+  }
+  return out
+}
