@@ -107,6 +107,10 @@ describe('変化の当て方 (applyChanges)', () => {
     ])
     expect(next.blocks.size).toBe(256)
     for (const k of ['0,1,0', '1,1,0', '2,1,0', '3,1,0']) expect(next.blocks.has(k)).toBe(false)
+    // 渡した盤面は書き換えない (消す側も)
+    expect(b.blocks.size).toBe(260)
+    expect([b.blocks.get('0,1,0'), b.blocks.get('1,1,0'), b.blocks.get('2,1,0'), b.blocks.get('3,1,0')])
+      .toEqual([LEVER_OFF, DUST_DOT, LAMP(false), LAMP(false)])
   })
 
   it('範囲の外と、座標が整数でない変化は当てない (それだけなら同じ盤面を返す)', () => {
@@ -135,9 +139,23 @@ describe('変化の当て方 (applyChanges)', () => {
     expect(next.blocks.get('1,1,0')).toBe(DUST_LINE(14))
   })
 
-  it('床の変化も当てる (盤面はエンジンの世界の写し)', () => {
+  it('床の変化も当てる (盤面はエンジンの世界の写し)。渡した盤面の床は残る', () => {
     const b = createBoard()
-    expect(applyChanges(b, [change(3, 0, 3, 'air')]).blocks.has('3,0,3')).toBe(false)
+    const next = applyChanges(b, [change(3, 0, 3, 'air'), change(4, 0, 4, 'glass')])
+    expect(next.blocks.has('3,0,3')).toBe(false)
+    expect(next.blocks.get('4,0,4')).toBe('glass')
+    expect(b.blocks.size).toBe(256)
+    expect([b.blocks.get('3,0,3'), b.blocks.get('4,0,4')]).toEqual([FLOOR_STATE, FLOOR_STATE])
+  })
+
+  it('範囲は盤面の bounds で決める (BOARD_BOUNDS ではない)', () => {
+    const narrow: Board = { bounds: { x: [0, 3], y: [0, 1], z: [0, 0] }, blocks: new Map([['0,0,0', 'stone']]) }
+    // BOARD_BOUNDS の中でも、狭い盤面の外なら当てない
+    expect(applyChanges(narrow, [change(5, 1, 0, LEVER_OFF), change(0, 1, 1, LEVER_OFF)])).toBe(narrow)
+    expect(applyChanges(narrow, [change(3, 1, 0, LEVER_OFF)]).blocks.get('3,1,0')).toBe(LEVER_OFF)
+    // BOARD_BOUNDS の外でも、広い盤面の中なら当てる
+    const wide: Board = { bounds: { x: [-8, 31], y: [0, 3], z: [0, 15] }, blocks: new Map() }
+    expect(applyChanges(wide, [change(-8, 3, 0, LAMP(false)), change(31, 2, 15, DUST_DOT)]).blocks.size).toBe(2)
   })
 
   it('列は配列のほか、繰り返せる物なら何でもよい (1 回だけ読む)', () => {
@@ -184,8 +202,16 @@ describe('エンジンへ読み込む列 (cellsToLoad)', () => {
     for (const key of ['16,1,0', '0,2,0', '0,-1,0', '-1,0,0']) {
       expect(() => cellsToLoad(boardWith({ [key]: LEVER_OFF })), key).toThrow(RangeError)
     }
-    // 何も無いマスは、鍵が崩れていても読み込まないので断らない
+    // 何も無いマスは、範囲の外でも鍵が崩れていても読み込まないので断らない
     expect(cellsToLoad(boardWith({ '99,9,9': 'air' }))).toHaveLength(256)
+    expect(cellsToLoad(boardWith({ 'a,b,c': 'air', '01,1,1': 'cave_air', '1,1': 'minecraft:void_air' }))).toHaveLength(256)
+  })
+
+  it('範囲は盤面の bounds で決める (BOARD_BOUNDS ではない)', () => {
+    const narrow: Board = { bounds: { x: [0, 3], y: [0, 1], z: [0, 0] }, blocks: new Map([['0,0,0', 'stone'], ['5,1,0', LEVER_OFF]]) }
+    expect(() => cellsToLoad(narrow)).toThrow(RangeError)
+    const wide: Board = { bounds: { x: [-8, 31], y: [0, 3], z: [0, 15] }, blocks: new Map([['31,2,15', DUST_DOT], ['-8,3,0', LAMP(false)]]) }
+    expect(cellsToLoad(wide)).toEqual([change(31, 2, 15, DUST_DOT), change(-8, 3, 0, LAMP(false))])
   })
 })
 
@@ -281,6 +307,11 @@ describe('見る (名前の一覧・全部切れか)', () => {
     expect(isAllOff(boardWith({ '1,1,0': DUST_LINE(15) }))).toBe(false)
     expect(isAllOff(boardWith({ '2,1,0': LAMP(true) }))).toBe(false)
     expect(isAllOff(boardWith({ '2,1,0': 'minecraft:redstone_lamp[lit=true]' }))).toBe(false)
+  })
+
+  it('プロパティの無い lever・redstone_wire・redstone_lamp は切と読む (点いている印が無い)', () => {
+    expect(isAllOff(boardWith({ '0,1,0': 'lever', '1,1,0': 'redstone_wire', '2,1,0': 'minecraft:redstone_lamp' }))).toBe(true)
+    expect(isAllOff(boardWith({ '0,1,0': 'lever[]', '1,1,0': 'redstone_wire[east=side]', '2,1,0': 'redstone_lamp[' }))).toBe(true)
   })
 
   it('ほかのブロックの powered・lit は見ない', () => {
