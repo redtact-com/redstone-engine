@@ -152,10 +152,14 @@ describe('変化の当て方 (applyChanges)', () => {
     const narrow: Board = { bounds: { x: [0, 3], y: [0, 1], z: [0, 0] }, blocks: new Map([['0,0,0', 'stone']]) }
     // BOARD_BOUNDS の中でも、狭い盤面の外なら当てない
     expect(applyChanges(narrow, [change(5, 1, 0, LEVER_OFF), change(0, 1, 1, LEVER_OFF)])).toBe(narrow)
-    expect(applyChanges(narrow, [change(3, 1, 0, LEVER_OFF)]).blocks.get('3,1,0')).toBe(LEVER_OFF)
+    const narrowNext = applyChanges(narrow, [change(3, 1, 0, LEVER_OFF)])
+    expect(narrowNext.blocks.get('3,1,0')).toBe(LEVER_OFF)
+    expect(narrowNext.bounds).toBe(narrow.bounds)   // 返した盤面の範囲は、渡した盤面の範囲のまま
     // BOARD_BOUNDS の外でも、広い盤面の中なら当てる
     const wide: Board = { bounds: { x: [-8, 31], y: [0, 3], z: [0, 15] }, blocks: new Map() }
-    expect(applyChanges(wide, [change(-8, 3, 0, LAMP(false)), change(31, 2, 15, DUST_DOT)]).blocks.size).toBe(2)
+    const wideNext = applyChanges(wide, [change(-8, 3, 0, LAMP(false)), change(31, 2, 15, DUST_DOT)])
+    expect(wideNext.blocks.size).toBe(2)
+    expect(wideNext.bounds).toBe(wide.bounds)
   })
 
   it('列は配列のほか、繰り返せる物なら何でもよい (1 回だけ読む)', () => {
