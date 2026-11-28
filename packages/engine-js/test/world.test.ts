@@ -331,6 +331,16 @@ describe('RustWorld', () => {
     ]) {
       expect(thrownStatus(use)).toBe(STATUS.HANDLE)
     }
+    // 例外の文の頭は、呼んだ操作の名前。
+    for (const [name, use] of [
+      ['use', () => a.use(0, 1, 0)],
+      ['place', () => a.place(0, 1, 0, stone)],
+      ['breakBlock', () => a.breakBlock(0, 1, 0)],
+      ['gameTime', () => a.gameTime()],
+      ['input (break)', () => a.input('break', 'A', 0, 1, 0)],
+    ] as const) {
+      expect(use, name).toThrow(new RegExp(`^${name.replace(/[()]/g, '\\$&')} \\(捨てた世界\\): HANDLE$`))
+    }
     expect(engine.epoch).toBe(before)
     b.dispose()
     c.dispose()
@@ -711,6 +721,7 @@ describe('安全網と trap', () => {
     )
     const world = e.createWorld()
     world.load(circuit(e))
+    const stone = e.resolve('stone')
     expect(world.step()).toBe(0)
     trap = true
     expect(() => world.step()).toThrow(EngineStoppedError)
@@ -725,6 +736,11 @@ describe('安全網と trap', () => {
     expect(() => world.load([])).toThrow(/^load: /)
     expect(() => world.step()).toThrow(/^step: /)
     expect(() => e.resolve('lever')).toThrow(/^resolve: /)
+    expect(() => world.use(0, 1, 0)).toThrow(/^use: /)
+    expect(() => world.place(1, 1, 1, stone)).toThrow(/^place: /)
+    expect(() => world.breakBlock(1, 1, 1)).toThrow(/^breakBlock: /)
+    expect(() => world.gameTime()).toThrow(/^gameTime: /)
+    expect(() => world.input('break', 'A', 1, 1, 1)).toThrow(/^input \(break\): /)
     // dispose は投げない (finally の中で、元の例外を隠さない)。安全網も呼ばない。
     expect(() => world.dispose()).not.toThrow()
     const core = new Core(patchedExports(() => ({})) as unknown as RseExports)

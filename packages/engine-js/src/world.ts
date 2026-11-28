@@ -142,7 +142,7 @@ export class RustWorld {
 
   /** 使う (右クリック)。既定の区間はプレイヤーの操作 (A。19 §4.1) */
   use(x: number, y: number, z: number, section: Section = 'A'): number {
-    return this.input('use', section, x, y, z)
+    return this.#input('use', 'use', section, x, y, z, 0)
   }
 
   /**
@@ -159,7 +159,7 @@ export class RustWorld {
   place(x: number, y: number, z: number, state: number, section: Section = 'A'): number {
     this.#live('place')
     if (!Number.isInteger(state) || state < 0 || state > 0xffff) throw new RangeError(`StateId でない: ${state}`)
-    return this.input('place', section, x, y, z, state)
+    return this.#input('place', 'place', section, x, y, z, state)
   }
 
   /**
@@ -168,7 +168,7 @@ export class RustWorld {
    * @returns エンジンの状態コード
    */
   breakBlock(x: number, y: number, z: number, section: Section = 'A'): number {
-    return this.input('break', section, x, y, z)
+    return this.#input('breakBlock', 'break', section, x, y, z, 0)
   }
 
   /**
@@ -192,13 +192,21 @@ export class RustWorld {
    * @returns エンジンの状態コード
    */
   input(kind: InputKind, section: Section, x: number, y: number, z: number, arg = 0): number {
-    this.#live(`input (${String(kind)})`)
+    return this.#input(`input (${String(kind)})`, kind, section, x, y, z, arg)
+  }
+
+  /**
+   * 入力の中身。`what` は呼んだ操作の名前 (use・place・breakBlock・input (種類))。捨てた後・止まった Engine・
+   * 窓口の状態コードの例外の文の頭は、どれもこの名前にする。
+   */
+  #input(what: string, kind: InputKind, section: Section, x: number, y: number, z: number, arg: number): number {
+    this.#live(what)
     const k = pick(INPUT_KIND, kind, '入力の種類')
     const s = pick(SECTION, section, '入力の区間')
     if (!Number.isInteger(arg) || arg < 0 || arg > 0xffffffff) throw new RangeError(`arg が 32 ビットの符号なし整数でない: ${arg}`)
     const pos = [int32(x, 'x'), int32(y, 'y'), int32(z, 'z')] as const
-    const status = this.#core.call('input', raw => raw.rse_input(this.#handle, k, s, pos[0], pos[1], pos[2], arg))
-    return this.#check(`input (${kind})`, status)
+    const status = this.#core.call(what, raw => raw.rse_input(this.#handle, k, s, pos[0], pos[1], pos[2], arg))
+    return this.#check(what, status)
   }
 
   /**
