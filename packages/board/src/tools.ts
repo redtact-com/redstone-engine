@@ -22,6 +22,7 @@ export const TOOLS: readonly Tool[] = Object.freeze(['lever', 'dust', 'lamp', 'e
  *
  * - レバー: 床置き・north・切。プロパティは face・facing・powered (V09 §3.1。既定は壁置きなので、床置きを書く)。
  *   床置きの取り付け方向は facing によらず上で、支え (真下) を強充電する向きも facing によらない (V09 §3.1・§4.1)。
+ *   ダストの接続も facing によらない (レバーは信号源なので、4 方向とも接続先になる。V06 §4.1)。
  *   信号と更新のうち facing を使うのは、実験的レッドストーンが有効な時の更新の向き (Orientation) だけ (V09 §4.1) なので、
  *   実験的レッドストーンを使わない世界では north に決めてよい。fixture の lever-wire-lamp と同じ文字列
  * - ダスト: 既定の状態 (4 方向とも none・power 0。V06 §3.1)。置いた時の形は周りから決まり、power は 0 (V06 §4.4)

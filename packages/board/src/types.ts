@@ -18,13 +18,13 @@ export interface BoardBounds {
 /**
  * 盤面。範囲と、マスの表。
  *
- * - `blocks` の鍵は `"x,y,z"` (世界の座標。`cellKey` で作る)、値は blockstate の文字列。
- *   board が作る値 (床・道具の置きたい状態) は `StateTable.name` の形 (プロパティを名前順で全部書き、`minecraft:` を付けない)。
- *   変化を当てる時 (`applyChanges`) は、渡された文字列をそのまま入れる。
- *   描く側は、先頭の `minecraft:` の有無とプロパティの並びを問わずにそろえて読む。
+ * - `blocks` の鍵は `cellKey` が作る字面 `"x,y,z"` だけ (世界の座標。10 進の整数で、前の 0・`-0`・`+`・空白なし)。
+ *   それ以外の鍵のマスと、範囲の外のマスは、`cellsToLoad` が RangeError にする (`applyChanges` は範囲の外の変化を当てない)。
+ * - 値は blockstate の文字列。board が作る値 (床・道具の置きたい状態) は `StateTable.name` の形
+ *   (プロパティを名前順で全部書き、`minecraft:` を付けない)。変化を当てる時 (`applyChanges`) は、渡された文字列をそのまま入れる。
  * - air・cave_air・void_air は何も無いマスとして扱う (書かなくてもよい)。
- * - 範囲の外のマスと、鍵が `"x,y,z"` の形 (どの部分も `/^-?\d+$/`) でないマスは描かない。
- *   描く側は、描かなかった数を知らせる。
+ *
+ * 描く側が鍵と値をどこまで読むか (そろえ方・描かなかった数の知らせ方) は、描く側が決める。
  */
 export interface Board {
   readonly bounds: BoardBounds

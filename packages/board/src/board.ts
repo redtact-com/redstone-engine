@@ -61,7 +61,7 @@ export function cellKey(x: number, y: number, z: number): string {
   return `${x},${y},${z}`
 }
 
-/** 鍵を座標にする。`cellKey` が作る形 (整数を 10 進で、前の 0・`+`・空白なし) でなければ null */
+/** 鍵を座標にする。`cellKey` が作る字面 (10 進の整数で、前の 0・`-0`・`+`・空白なし) でなければ null */
 function cellOf(key: string): Pos3 | null {
   const parts = key.split(',')
   if (parts.length !== 3) return null

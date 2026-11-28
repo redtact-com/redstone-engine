@@ -8,8 +8,9 @@
  * 盤面を描く時の決まり (board の `Board` の注の「描く側」は view-3d のこと):
  * - 先頭の `minecraft:` の有無とプロパティの並びは `normalizeState` でそろえる。`PickRoleFn` にも、その形で渡す。
  *   押せるかを素通りの一覧で済ませるなら、`PickRoleFn` は `pickRoleFrom(isTarget)` で作る
- * - 範囲の外のマスと、鍵が `"x,y,z"` の形でないマスは描かず、その数を `IsometricView` の `onBoardApplied` で知らせる
- *   (`ApplyResult.outside`)
+ * - 鍵は、3 つの部分がどれも `/^-?\d+$/` の字面なら整数として読んで描く (board の `cellKey` の字面より緩い。
+ *   `"01,0,0"` も 1,0,0 として描く)。範囲の外のマスと、この形でない鍵のマスは描かず、
+ *   その数を `IsometricView` の `onBoardApplied` で知らせる (`ApplyResult.outside`)
  */
 
 export type { Board, BoardBounds, CellChange, PickRole, PickRoleFn, Pos3 } from '@redstone-engine/board'
