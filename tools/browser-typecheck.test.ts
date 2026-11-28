@@ -10,7 +10,11 @@ import ts from 'typescript'
  * 効き目は `"types": []` と、対象のファイルが @types/node をたどらないことに乗っている。どちらかが崩れても
  * (`"types": []` を消してルートの `types: ["node"]` を継ぐ・対象のファイルが vite の型を読む) `npm run typecheck` は
  * 黙って通るので、設定を型検査器で読み、(a) 読むファイルに @types/node が無いこと、(b) Node の物を書いた仮のファイルが
- * 落ちること、を見る。ファイルの中の三重スラッシュの指示は設定では止まらないので、各パッケージの依存の見張りが拾う。
+ * 落ちること、を見る。
+ *
+ * ファイルの中の三重スラッシュの指示は、設定の `types` と `lib` では止まらない。`types=node` で @types/node を読み込む形は
+ * (a) が読むファイルの一覧で拾い、`lib=esnext` で lib を広げる形は (a) が読む lib の一覧で拾う。
+ * board と view-3d は依存の見張りでも拾う。engine-js には依存の見張りが無いので、engine-js で拾うのは (a) だけ。
  */
 
 const REPO_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -33,8 +37,8 @@ const NODE_TYPES = /(^|\/)node_modules\/(@types\/node|vite|vitest)\//
 /** 仮のファイル (board の src の中にあるとして解く。手元の盤面には置かない) */
 const PROBE = join(REPO_DIR, 'packages', 'board', 'src', '__probe__.ts')
 
-/** 仮のファイルを足した program の、仮のファイルの誤りの番号 */
-function probeCodes(cfg: ts.ParsedCommandLine, text: string): number[] {
+/** 仮のファイル 1 つだけを根にした program */
+function probeProgram(cfg: ts.ParsedCommandLine, text: string): { program: ts.Program; sf: ts.SourceFile } {
   const host = ts.createCompilerHost(cfg.options)
   const getSourceFile = host.getSourceFile.bind(host)
   host.getSourceFile = (name, lang, ...rest) =>
@@ -44,7 +48,21 @@ function probeCodes(cfg: ts.ParsedCommandLine, text: string): number[] {
   const program = ts.createProgram([PROBE], cfg.options, host)
   const sf = program.getSourceFile(PROBE)
   if (!sf) throw new Error('仮のファイルが program に入っていない')
+  return { program, sf }
+}
+
+/** 仮のファイルを足した program の、仮のファイルの誤りの番号 */
+function probeCodes(cfg: ts.ParsedCommandLine, text: string): number[] {
+  const { program, sf } = probeProgram(cfg, text)
   return [...program.getSyntacticDiagnostics(sf), ...program.getSemanticDiagnostics(sf)].map(d => d.code).sort()
+}
+
+/** program が読んだ TS の lib のファイル (lib.es2023.d.ts など) の名前 */
+function libsOf(program: ts.Program): string[] {
+  return program.getSourceFiles().map(sf => repoPath(sf.fileName))
+    .filter(f => /(^|\/)node_modules\/typescript\/lib\/lib\.[^/]*\.d\.ts$/.test(f))
+    .map(f => f.slice(f.lastIndexOf('/') + 1))
+    .sort()
 }
 
 /** Node の型が無い時の誤り (`Buffer`・`process` の名前と、`node:fs` のモジュール。どちらも「Do you need to install type definitions for node?」) */
@@ -71,12 +89,17 @@ describe('ブラウザの入口の型検査 (tsconfig.browser.json)', () => {
     expect(pkg.scripts.typecheck).toContain('tsc -p tsconfig.browser.json')
   })
 
-  it('(a) 読むファイルに @types/node (と vite・vitest の型) が無い', () => {
+  it('(a) 読むファイルに @types/node (と vite・vitest の型) が無く、lib は設定の lib から広がらない', () => {
     const cfg = configOf('tsconfig.browser.json')
     const program = ts.createProgram(cfg.fileNames, cfg.options)
     const files = program.getSourceFiles().map(sf => repoPath(sf.fileName))
     expect(files.length).toBeGreaterThan(cfg.fileNames.length)   // lib と依存の型も読んでいる
     expect(files.filter(f => NODE_TYPES.test(f))).toEqual([])
+    // lib は、何も書かない仮のファイル 1 つの program と同じ (どこかの `/// <reference lib=… />` で広がっていない)
+    const libs = libsOf(probeProgram(cfg, 'export {}').program)
+    expect(libs).toContain('lib.es2023.d.ts')
+    expect(libs).not.toContain('lib.esnext.d.ts')
+    expect(libsOf(program)).toEqual(libs)
     // 見張りが効くこと: ルートの設定 (types: ["node"]) では @types/node を読む
     const root = configOf('tsconfig.json')
     const rootFiles = ts.createProgram(cfg.fileNames, root.options).getSourceFiles().map(sf => repoPath(sf.fileName))
@@ -99,8 +122,14 @@ describe('ブラウザの入口の型検査 (tsconfig.browser.json)', () => {
     expect(probeCodes(browser, 'export const d: Uint8Array = new TextEncoder().encode("x")')).toEqual([])
   }, 60_000)
 
-  it('ファイルの中の三重スラッシュの指示 (types=node) は types: [] をすり抜ける (だから依存の見張りが拾う)', () => {
+  it('ファイルの中の三重スラッシュの指示 (types=node・lib=esnext) は設定をすり抜ける (だから (a) が一覧で拾う。engine-js には依存の見張りが無い)', () => {
     const browser = configOf('tsconfig.browser.json')
     expect(probeCodes(browser, '/// <reference types="node" />\nexport const a = Buffer.alloc(1)')).toEqual([])
+    // ES2023 に無い API (Set の union) は落ちるが、lib=esnext の指示があると通る
+    const union = 'export const u = new Set([1]).union(new Set([2]))'
+    expect(probeCodes(browser, union)).toEqual([2550])
+    expect(probeCodes(browser, `/// <reference lib="esnext" />\n${union}`)).toEqual([])
+    // その時は、読む lib の一覧が広がる ((a) が拾う)
+    expect(libsOf(probeProgram(browser, `/// <reference lib="esnext" />\n${union}`).program)).toContain('lib.esnext.d.ts')
   }, 60_000)
 })

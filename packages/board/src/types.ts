@@ -19,7 +19,8 @@ export interface BoardBounds {
  * 盤面。範囲と、マスの表。
  *
  * - `blocks` の鍵は `cellKey` が作る字面 `"x,y,z"` だけ (世界の座標。10 進の整数で、前の 0・`-0`・`+`・空白なし)。
- *   それ以外の鍵のマスと、範囲の外のマスは、`cellsToLoad` が RangeError にする (`applyChanges` は範囲の外の変化を当てない)。
+ *   それ以外の鍵の何かあるマスと、範囲の外の何かあるマスは、`cellsToLoad` が RangeError にする
+ *   (何も無いマスは読み込まないので断らない。`applyChanges` は範囲の外の変化を当てない)。
  * - 値は blockstate の文字列。board が作る値 (床・道具の置きたい状態) は `StateTable.name` の形
  *   (プロパティを名前順で全部書き、`minecraft:` を付けない)。変化を当てる時 (`applyChanges`) は、渡された文字列をそのまま入れる。
  * - air・cave_air・void_air は何も無いマスとして扱う (書かなくてもよい)。

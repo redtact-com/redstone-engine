@@ -105,7 +105,8 @@ function propOf(state: string, key: string): string | undefined {
  * エンジンへ読み込む列。何も無いマスは入れない。
  *
  * 並びは決まった順 (y・z・x の小さい順)。床 (y=0) が先に入り、同じ段は fixture の `blocks` と同じ並びになる。
- * 鍵が `cellKey` の形でないマスと、範囲の外のマスがあれば RangeError (盤面とエンジンの世界がずれるので、黙って落とさない)
+ * 鍵が `cellKey` の字面でない何かあるマスと、範囲の外の何かあるマスがあれば RangeError (盤面とエンジンの世界がずれるので、
+ * 黙って落とさない)。何も無いマスは鍵を確かめる前に飛ばすので、鍵が崩れていても範囲の外でも断らない
  */
 export function cellsToLoad(board: Board): CellChange[] {
   const out: CellChange[] = []
