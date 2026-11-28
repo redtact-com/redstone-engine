@@ -5,8 +5,11 @@
  * Rust 側と同じ値で固定する。変えたら両方の ABI_VERSION を上げる。
  */
 
-/** 窓口の版。読み込んだ wasm の rse_abi_version と合わなければ断る */
-export const ABI_VERSION = 1
+/**
+ * 窓口の版。読み込んだ wasm の rse_abi_version と合わなければ断る。
+ * 2 で、置く・壊すの入力 (INPUT_KIND の place と break) と、時計を読む rse_game_time を足した (#13)
+ */
+export const ABI_VERSION = 2
 
 /** wasm が書き出す物。ポインタは線形メモリの番地 (i32 で来るので `>>> 0` で読む) */
 export interface RseExports {
@@ -20,9 +23,11 @@ export interface RseExports {
   rse_step(handle: number, n: number): number
   rse_input(handle: number, kind: number, section: number, x: number, y: number, z: number, arg: number): number
   rse_changes(handle: number, lenOut: number): number
+  /** i64 なので BigInt で来る。ハンドルが無ければ -1n */
+  rse_game_time(handle: number): bigint
 }
 
-/** 書き出す関数 (7 関数 + 作業領域の 1 + 版の 1) */
+/** 書き出す関数 (19 §2.5 の 7 関数 + 作業領域の 1 + 版の 1 + 時計の 1) */
 export const EXPORTED_FUNCTIONS = [
   'rse_abi_version',
   'rse_scratch',
@@ -33,6 +38,7 @@ export const EXPORTED_FUNCTIONS = [
   'rse_step',
   'rse_input',
   'rse_changes',
+  'rse_game_time',
 ] as const
 
 /** マスの記録 (x, y, z, state。どれも 32 ビット) の i32 の数とバイト数。読み込みと変化で同じ形 */
@@ -43,8 +49,14 @@ export const CELL_BYTES = 16
 export const LOAD_MODE = { settled: 0, rebuild: 1 } as const
 export type LoadMode = keyof typeof LOAD_MODE
 
-/** 入力の種類。setBlock は席だけで、UNIMPLEMENTED を返す */
-export const INPUT_KIND = { use: 0, setBlock: 1 } as const
+/**
+ * 入力の種類 (crates/rse-wasm の input_kind と同じ値)。
+ * - use: 使う (右クリック)。arg は 0
+ * - setBlock: 席だけで、UNIMPLEMENTED を返す。arg は StateId | (strict << 16)
+ * - place: 置く (プレイヤーの設置)。arg は置く StateId (上の 16 ビットは 0)
+ * - break: 壊す (プレイヤーの破壊)。arg は 0
+ */
+export const INPUT_KIND = { use: 0, setBlock: 1, place: 2, break: 3 } as const
 export type InputKind = keyof typeof INPUT_KIND
 
 /** 入力の区間の印 (19 §4.1)。値は rse-core の InputSection と同じ。順は変えない (呼んだ順に適用する) */

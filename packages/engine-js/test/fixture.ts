@@ -10,10 +10,14 @@
  *   書き出し) は写しを変えないので出ない。余りが無いこと (正味の変化) は rse-wasm と rse-core の単体テストが見る。
  * - 状態コードが立ったら不一致と同じに扱う。
  * - 表に無いブロック・知らない入力・読まない欄は、エラーで止める。文は native と同じにする。
+ * - 毎 tick、比べた後に世界の時計 (gameTime) を読んで報告に残す。合否には入れない (native の報告に無い)。
+ *   時計を読むと変化の窓が古くなるので、変化を読み切った後に読む。
+ * - 初めの盤面の組み方は差し替えられる (既定は blocks を load の settled で置く)。置く入力で組む試験が使う。
  */
 
 import type { Engine } from '../src/engine'
 import { ABI_STATUS, EngineError, SECTION, type Section, statusNames } from '../src/abi'
+import type { RustWorld } from '../src/world'
 
 export interface Pos {
   readonly x: number
@@ -50,7 +54,12 @@ export interface Report {
   mismatches: Mismatch[]
   /** 状態コードが立った tick と、その値 */
   statuses: [number, number][]
+  /** tick 0〜ticks の各回の、比べた後に読んだ世界の時計 (gameTime) */
+  times: number[]
 }
+
+/** 初めの盤面を、空の世界に組む。組んだ変化は読まずに残す (実行器が変化の窓で写しを作る) */
+export type Build = (world: RustWorld, f: Fixture, engine: Engine) => void
 
 export function passed(r: Report): boolean {
   return r.mismatches.length === 0 && r.statuses.length === 0
@@ -211,8 +220,21 @@ function firstUnplaceable(f: Fixture, engine: Engine): Pos | undefined {
   }
 }
 
-/** wasm の世界で回して、毎 tick の領域の全マスを期待と比べる */
-export function runFixture(f: Fixture, engine: Engine): Report {
+/** 既定の組み方: fixture の blocks を、更新を出さずに置く (load の settled) */
+export const loadBlocks: Build = (world, f, engine) => {
+  try {
+    const status = world.load(f.blocks.map(b => ({ ...b.pos, state: b.state })))
+    if (status !== 0) throw new Error(`置いた時に状態コード ${statusNames(status).join(' | ')}`)
+  } catch (e) {
+    // load は全部か無しかなので、native と同じ文 (最初に置けないマスの座標) のために、1 マスずつ置き直して探す。
+    const at = e instanceof EngineError && e.status & ABI_STATUS.OUT_OF_WORLD ? firstUnplaceable(f, engine) : undefined
+    if (at === undefined) throw e
+    throw new Error(`(${at.x}, ${at.y}, ${at.z}) に置けない (高さか格子の枠の外)`)
+  }
+}
+
+/** wasm の世界で回して、毎 tick の領域の全マスを期待と比べる。初めの盤面は `build` で組む */
+export function runFixture(f: Fixture, engine: Engine, build: Build = loadBlocks): Report {
   const air = engine.states.name(0)
   const board = new Map<string, string>()
   for (const pos of region(f)) board.set(key(pos), air)
@@ -229,18 +251,10 @@ export function runFixture(f: Fixture, engine: Engine): Report {
       const w = world.changes()
       for (let i = 0; i < w.count; i++) actual.set(`${w.x(i)},${w.y(i)},${w.z(i)}`, w.state(i))
     }
-    try {
-      const status = world.load(f.blocks.map(b => ({ ...b.pos, state: b.state })))
-      if (status !== 0) throw new Error(`置いた時に状態コード ${statusNames(status).join(' | ')}`)
-    } catch (e) {
-      // load は全部か無しかなので、native と同じ文 (最初に置けないマスの座標) のために、1 マスずつ置き直して探す。
-      const at = e instanceof EngineError && e.status & ABI_STATUS.OUT_OF_WORLD ? firstUnplaceable(f, engine) : undefined
-      if (at === undefined) throw e
-      throw new Error(`(${at.x}, ${at.y}, ${at.z}) に置けない (高さか格子の枠の外)`)
-    }
+    build(world, f, engine)
     sync()
 
-    const report: Report = { name: f.name, ticks: f.ticks, stepped: 0, compared: 0, mismatches: [], statuses: [] }
+    const report: Report = { name: f.name, ticks: f.ticks, stepped: 0, compared: 0, mismatches: [], statuses: [], times: [] }
     for (let t = 0; t <= f.ticks; t++) {
       // 初めの盤面は tick −1 の状態。t = 0 では進めず、tick 0 の入力だけを入れる。
       let status = 0
@@ -264,6 +278,8 @@ export function runFixture(f: Fixture, engine: Engine): Report {
         report.compared++
         if (expect !== got) report.mismatches.push({ tick: t, pos, expect, actual: got })
       }
+      // 変化は上の sync で読み切った。時計を読むと窓は古くなるが、もう使わない。
+      report.times.push(world.gameTime())
     }
     return report
   } finally {
