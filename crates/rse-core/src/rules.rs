@@ -16,6 +16,20 @@ use crate::state::{BlockId, StateId, flag};
 use crate::update::Orientation;
 use rse_java::{Dir, Pos};
 
+/// 置いた時の状態の答え ([`Rules::placement_state`])。
+///
+/// 「置けない」と「規則がまだ無い」を分ける。前は実機でも何も起きないので状態コードを立てず、
+/// 後は実機と違う結果になりうるので、骨格が UNIMPLEMENTED を立てる。どちらの時も、骨格は何も書かない。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Placement {
+    /// この状態を置く。
+    State(StateId),
+    /// 置けない。実機でも何も起きない。
+    Refused,
+    /// 置いた時の規則がまだ無い。
+    Unimplemented,
+}
+
 /// 素子の振る舞い。型そのものが振り分けの表で、値は素子が世界ごとに持つ状態
 /// (`Level::rules`) を入れる所として使う。
 pub trait Rules: Sized {
@@ -69,6 +83,22 @@ pub trait Rules: Sized {
 
     /// 入力「使う」(右クリック) を受ける (V01 §4.10)。何かしたら真。
     fn use_block(lv: &mut Level<Self>, pos: Pos, state: StateId) -> bool;
+
+    /// プレイヤーが置く時の状態を決める (V06 §4.4・V11 §4.1・V09 §3.1。BlockBehaviour.getStateForPlacement に当たる)。
+    /// `requested` は入力が運んだ状態で、置くブロックと、プレイヤーが選ぶ値 (レバーの face・facing) を運ぶ。
+    /// 周りで決まる値 (ダストの 4 方向と power・ランプの lit) は読まずに、世界から決める。
+    ///
+    /// 世界を書き換えない。置く手順 ([`crate::input`]) は、ここと [`Rules::can_survive`] を済ませてから 1 回だけ書く。
+    /// 断る時に何も書かないことを、引数の型で守る。状態コードも立てられないので、規則が無い時は
+    /// [`Placement::Unimplemented`] を返し、骨格に立てさせる。
+    fn placement_state(lv: &Level<Self>, pos: Pos, requested: StateId) -> Placement;
+
+    /// `state` が `pos` に居られるか (V07 §4.13・V06 §4.5・V09 §4.1。BlockBehaviour.canSurvive に当たる)。
+    /// 置く手順が、[`Rules::placement_state`] の返した状態について呼ぶ。偽なら置かない。世界を書き換えない。
+    ///
+    /// 形状更新や近隣更新で支えを確かめ直す所は、素子の関数が自分で持つ (どの更新で・何を見て確かめるかが
+    /// 素子ごとに違う。V06 §4.5・V09 §4.1)。この口は通らない。
+    fn can_survive(lv: &Level<Self>, pos: Pos, state: StateId) -> bool;
 
     /// 弱い信号 (V05 §2.1。BlockBehaviour.getSignal)。
     /// `dir` は読み手から源へ向かう向き (V05 §2.2)。世界を書き換えない。

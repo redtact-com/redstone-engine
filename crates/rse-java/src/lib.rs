@@ -12,6 +12,8 @@
 //! 乱数・開番地の写し・正弦表は、使う素子が入る PR で足す。
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
+// doctest には crate の forbid が効かないので、doctest にも付ける (docs/wasm-abi.md §5)。今は doctest が無い。
+#![doc(test(attr(forbid(unsafe_code))))]
 
 extern crate alloc;
 

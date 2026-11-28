@@ -559,7 +559,8 @@ mod tests {
         }
     }
 
-    /// プレイヤーが置くのと同じに置く (設置の時の状態をフラグ 11 で書く。V06 §4.14)。
+    /// 設置の時の状態をフラグ 11 で書く (V06 §4.14)。素子の関数だけを見るための近道で、置く先が置き換え可能かと
+    /// 支えを確かめない。本物の手順は置く入力 (rse-core の input) にある。
     fn place_wire(lv: &mut Level<Bench>, pos: Pos) {
         let state = placement_state(lv, pos);
         lv.set_block(pos, state, UpdateFlags::ALL_IMMEDIATE);

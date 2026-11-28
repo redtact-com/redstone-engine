@@ -7,7 +7,7 @@
 use crate::{RedstoneRules, RedstoneState, lamp, lever, wire};
 use rse_core::state::{block, flag};
 use rse_core::{
-    Behavior, BlockId, Config, Dir, Level, Orientation, Pos, Rules, StateId, UpdateFlags,
+    Behavior, BlockId, Config, Dir, Level, Orientation, Placement, Pos, Rules, StateId, UpdateFlags,
 };
 
 #[derive(Default)]
@@ -99,6 +99,26 @@ impl Rules for Bench {
             Behavior::Lever => lever::use_block(lv, pos, state),
             Behavior::Wire => wire::use_block(lv, pos, state),
             _ => false,
+        }
+    }
+
+    // 配る版の振り分け (rse-engine) と同じ答え。族の 3 素子と、プロパティを持たない材料だけを置く。
+    fn placement_state(lv: &Level<Self>, pos: Pos, requested: StateId) -> Placement {
+        match requested.behavior() {
+            Behavior::Wire => Placement::State(wire::placement_state(lv, pos)),
+            Behavior::Lamp => Placement::State(lamp::placement_state(lv, pos)),
+            Behavior::Lever => lever::placement_state(requested),
+            _ if requested.is_air() => Placement::Refused,
+            _ if requested.block().state_count() == 1 => Placement::State(requested),
+            _ => Placement::Unimplemented,
+        }
+    }
+
+    fn can_survive(lv: &Level<Self>, pos: Pos, state: StateId) -> bool {
+        match state.behavior() {
+            Behavior::Wire => wire::can_survive(lv, pos),
+            Behavior::Lever => lever::can_survive(lv, pos, state),
+            _ => true,
         }
     }
 

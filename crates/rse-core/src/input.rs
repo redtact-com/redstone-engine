@@ -8,11 +8,43 @@
 //! - 予約の基準の時刻は今のゲーム時刻。入力由来の予約は、tick の中の予約より 1 tick 早く見える (V01 §2.4)。
 //! - 凍結中も入力は通る。予約とブロックイベントは溜まるだけ (V01 §4.8)。
 //!
-//! 縦切りで中身があるのは「使う」だけ。ほかの入力は席で、UNIMPLEMENTED を返す。
+//! 中身があるのは「使う」「置く」「壊す」。setblock は席で、UNIMPLEMENTED を返す。
+//!
+//! # 置く (プレイヤーの設置)
+//!
+//! 確かめを全部済ませてから、1 回だけ書く。確かめの間は世界を書かず、フックも呼ばない。
+//!
+//! 1. 置く先の今の状態が置き換え可能か (V09 付録 A.3・V05 §4.7.1。縦切りの表では空気だけ)。
+//! 2. 置いた時の状態を決める ([`Rules::placement_state`]。V06 §4.4・V11 §4.1・V09 §3.1)。
+//! 3. その状態が居られるか ([`Rules::can_survive`]。V07 §4.13 の手順 1)。
+//! 4. フラグ 11 で書く (V06 §4.14・V07 §4.13 の手順 2・V08 §4.1.7 の表)。
+//!
+//! - 書き込みの順 (設置フック → NC → SU) は [`crate::set_block`] のふつうの手順のまま。設置フックの中で
+//!   状態が変わると外側の NC と SU が出ない (V06 §4.14 の落とし穴) のも、手順 5 の読み直しが受け持つ。
+//! - 置く状態を周りの形状更新で直す段は通らない (V08 §4.2.5 の表)。だから、置いた時の状態は 2 の口だけで決まる。
+//! - /setblock の経路 (V04 §4.11) とは別物である。あちらは書く前に周りに合わせて直し、フラグ 2 + 256 で書き、
+//!   後から NC を配る。孤立したダストは、設置では十字に、/setblock では点になる (V06 §4.14.1)。
+//! - 置いた後の後始末 (BlockItem.place が書き込みの後に呼ぶ Block.setPlacedBy。V07 §4.13 の手順 3・V11 §4.7) は
+//!   まだ無い。足す場所は 4 の後で、置いた位置がまだそのブロックである時だけ呼ぶ。ダイオードの族と一緒に、
+//!   Rules の口として足す。
+//! - UNVERIFIED: 1〜4 の順と条件、縦切りの 3 素子が置いた後の後始末を持たないことは、メモの別々の節
+//!   (上の典拠) から組んだ。プレイヤーの設置を通しで書いた節はまだ無い (redstone-sim#446 の質問 1)。
+//!
+//! # 壊す (プレイヤーの破壊)
+//!
+//! 空気をフラグ 3 で書く ([`Level::remove_block`]。V04 §4.10・V15 §5.5・V08 §4.1.7 の表)。
+//! 撤去フックは書き込みの中で走る (V04 §4.2 の手順 7。ダストは V06 §4.15、入ったレバーは V09 §4.1)。
+//!
+//! - 範囲は確かめない。高さの外も格子の枠の外も、読むと空気である。空気を壊すのは同じ状態の書き込みで、
+//!   書き込みは同じ状態なら格子に触る前に戻る (V04 §5.1)。だから何も起きず、SAFETY も立たない。
+//! - ドロップ・GameEvent は持たない。
+//! - UNVERIFIED: プレイヤーの破壊の中身を「空気をフラグ 3 で書くだけ」としたのは、V15 §5.5 と V08 §4.1.7 の
+//!   1 行ずつから組んだ (redstone-sim#446 の質問 3)。
 
 use crate::level::Level;
-use crate::rules::Rules;
-use crate::state::StateId;
+use crate::rules::{Placement, Rules};
+use crate::set_block::UpdateFlags;
+use crate::state::{StateId, flag};
 use crate::status::Status;
 use rse_java::Pos;
 
@@ -43,6 +75,11 @@ pub enum Input {
         state: StateId,
         strict: bool,
     },
+    /// 置く (プレイヤーの設置。V01 §4.10)。
+    /// `state` は置くブロックと、プレイヤーが選ぶ値を運ぶ。周りで決まる値は、置いた時の規則が決める。
+    Place { pos: Pos, state: StateId },
+    /// 壊す (プレイヤーの破壊。V01 §4.10)。
+    Break { pos: Pos },
 }
 
 /// 区間の印を付けた入力。
@@ -64,7 +101,7 @@ pub fn sort_by_section(inputs: &mut [MarkedInput]) {
 /// 入力の結果。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct InputOutcome {
-    /// 素子が入力を受けて何かしたか。
+    /// 素子が入力を受けて何かしたか。置くなら「書けた」、壊すなら「空気でない物を消した」。
     pub accepted: bool,
     /// この入力の間 (と、前に取り出した後) に立った状態コード。
     pub status: Status,
@@ -85,11 +122,41 @@ impl<R: Rules> Level<R> {
                 self.raise(Status::UNIMPLEMENTED);
                 false
             }
+            Input::Place { pos, state } => self.place(pos, state),
+            // 範囲は確かめない (冒頭の注)。
+            Input::Break { pos } => self.remove_block(pos, false),
         };
         InputOutcome {
             accepted,
             status: self.take_status(),
         }
+    }
+
+    /// 置く (冒頭の注の 1〜4)。書けたら真。
+    fn place(&mut self, pos: Pos, requested: StateId) -> bool {
+        // 1〜3 は `&self` で読むだけ。断る時に、世界にもフックにも触れない。
+        let Some(state) = self.placement_for(pos, requested) else {
+            return false;
+        };
+        // 4. 高さの外は書き込みの手順 1 が断る。格子の枠の外は SAFETY が立つ (実機なら書ける)。
+        self.set_block(pos, state, UpdateFlags::ALL_IMMEDIATE)
+    }
+
+    /// 置く前の確かめ。置く状態を返す。置かないなら `None`。
+    fn placement_for(&mut self, pos: Pos, requested: StateId) -> Option<StateId> {
+        let lv = &*self;
+        if !lv.world.get(pos).has(flag::REPLACEABLE) {
+            return None;
+        }
+        let state = match R::placement_state(lv, pos, requested) {
+            Placement::State(state) => state,
+            Placement::Refused => return None,
+            Placement::Unimplemented => {
+                self.raise(Status::UNIMPLEMENTED);
+                return None;
+            }
+        };
+        R::can_survive(lv, pos, state).then_some(state)
     }
 }
 
@@ -99,7 +166,7 @@ mod tests {
     use super::*;
     use crate::set_block::UpdateFlags;
     use crate::state::block;
-    use crate::testing::{Act, Ev, level, lit_lamp};
+    use crate::testing::{Act, Asked, Ev, level, lit_lamp};
     use crate::ticks::TickPriority;
 
     // 境界の中での時刻順 (V01 §2.4): 移動に伴う検知 → コマンド → プレイヤーの操作 → 関数。
@@ -246,5 +313,277 @@ mod tests {
             }
         );
         assert_eq!(lv.get_state(Pos::new(0, 0, 0)), StateId::AIR);
+    }
+
+    const SPOT: Pos = Pos::new(0, 0, 0);
+
+    fn place(state: StateId) -> Input {
+        Input::Place { pos: SPOT, state }
+    }
+
+    // 置く: 置いた時の状態 → 支えの順に聞いてから、1 回だけフラグ 11 で書く。聞く間は、フックも更新も 1 つも無い。
+    // 支えの口には、置いた時の状態の口が返した状態が渡る (要求の状態ではない)。
+    // 書き込みはふつうの順 (V04 §7.2 の 1): 撤去フック (空気) → 設置フック → NC 6 件 (送り元は古いブロック = 空気。
+    // V15 §5.5) → 古い状態の間接 SU → SU 6 件 → 新しい状態の間接 SU。間接 SU に渡るフラグは 11 から 1 を落とした 10。
+    #[test]
+    fn place_asks_then_writes_once_with_flag_11() {
+        let mut lv = level();
+        let lamp = block::REDSTONE_LAMP.default_state();
+        lv.rules
+            .placement
+            .insert(SPOT, Placement::State(lit_lamp()));
+        let out = lv.input(A, place(lamp));
+        assert_eq!(
+            out,
+            InputOutcome {
+                accepted: true,
+                status: Status::OK
+            }
+        );
+        assert_eq!(lv.get_state(SPOT), lit_lamp());
+        assert_eq!(
+            *lv.rules.asked.borrow(),
+            [
+                Asked::Placement {
+                    pos: SPOT,
+                    requested: lamp,
+                    hooks_before: 0
+                },
+                Asked::Survive {
+                    pos: SPOT,
+                    state: lit_lamp(),
+                    hooks_before: 0
+                },
+            ]
+        );
+        let log = &lv.rules.log;
+        assert_eq!(
+            log[..2],
+            [
+                Ev::Remove {
+                    pos: SPOT,
+                    old: StateId::AIR,
+                    moved: false
+                },
+                Ev::Place {
+                    pos: SPOT,
+                    state: lit_lamp(),
+                    old: StateId::AIR,
+                    moved: false
+                },
+            ]
+        );
+        let ncs: Vec<&Ev> = log.iter().filter(|e| matches!(e, Ev::Nc { .. })).collect();
+        assert_eq!(ncs.len(), 6);
+        assert!(
+            ncs.iter()
+                .all(|e| matches!(e, Ev::Nc { src, .. } if *src == block::AIR))
+        );
+        let indirect: Vec<(StateId, UpdateFlags, i32)> = log
+            .iter()
+            .filter_map(|e| match e {
+                Ev::Indirect {
+                    state, flags, left, ..
+                } => Some((*state, *flags, *left)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            indirect,
+            [
+                (StateId::AIR, UpdateFlags(10), 511),
+                (lit_lamp(), UpdateFlags(10), 511)
+            ]
+        );
+        assert_eq!(log.iter().filter(|e| matches!(e, Ev::Su { .. })).count(), 6);
+        // 2 + 6 + 1 + 6 + 1。書き込みは 1 回だけ。
+        assert_eq!(log.len(), 16);
+    }
+
+    // 断る 4 通り: 置き換え可能でない・置けない・規則が無い・支えが無い。
+    // どれも世界は変わらず、フックも更新も 1 つも無い。状態コードが立つのは「規則が無い」だけ。
+    // 置き換え可能でない時は、口も呼ばない。置けない・規則が無い時は、支えを聞かない。
+    #[test]
+    fn refused_place_writes_nothing_and_calls_no_hook() {
+        let stone = block::STONE.default_state();
+        let lamp = block::REDSTONE_LAMP.default_state();
+        // (置く先の状態, 置いた時の状態の答え, 支えの答え, 口を呼ぶ数, 状態コード)
+        type Case = (StateId, Option<Placement>, bool, usize, Status);
+        let cases: [Case; 4] = [
+            (stone, None, true, 0, Status::OK),
+            (StateId::AIR, Some(Placement::Refused), true, 1, Status::OK),
+            (
+                StateId::AIR,
+                Some(Placement::Unimplemented),
+                true,
+                1,
+                Status::UNIMPLEMENTED,
+            ),
+            (StateId::AIR, None, false, 2, Status::OK),
+        ];
+        for (before, answer, survives, asked, status) in cases {
+            let mut lv = level();
+            lv.set_state_raw(SPOT, before);
+            lv.drain_changes();
+            if let Some(answer) = answer {
+                lv.rules.placement.insert(SPOT, answer);
+            }
+            lv.rules.survive.insert(SPOT, survives);
+            let out = lv.input(A, place(lamp));
+            let case = format!("{before} {answer:?} {survives}");
+            assert_eq!(
+                out,
+                InputOutcome {
+                    accepted: false,
+                    status
+                },
+                "{case}"
+            );
+            assert_eq!(lv.get_state(SPOT), before, "{case}");
+            assert_eq!(lv.rules.log, [], "{case}");
+            assert_eq!(lv.rules.asked.borrow().len(), asked, "{case}");
+            assert!(lv.drain_changes().is_empty(), "{case}");
+            assert_eq!(lv.scheduled_tick_count(), 0, "{case}");
+        }
+    }
+
+    // 置く・壊すは、凍結中も通る。ゲーム時刻は進めない (V01 §4.8・§2.4)。
+    #[test]
+    fn place_and_break_work_while_frozen_and_keep_the_clock() {
+        let mut lv = level();
+        let lamp = block::REDSTONE_LAMP.default_state();
+        lv.tick();
+        lv.tick_frozen();
+        assert!(lv.input(A, place(lamp)).accepted);
+        assert_eq!(lv.get_state(SPOT), lamp);
+        assert!(lv.input(A, Input::Break { pos: SPOT }).accepted);
+        assert_eq!(lv.get_state(SPOT), StateId::AIR);
+        assert_eq!(lv.game_time(), 1);
+        assert_eq!(lv.scheduled_tick_count(), 0);
+    }
+
+    // 設置フックが積んだ予約は、入力の時刻が基準になる (V01 §2.4)。tick 1 の後に置いて遅延 2 なら、tick 3 に走る。
+    #[test]
+    fn ticks_scheduled_while_placing_use_the_input_time() {
+        let mut lv = level();
+        let lamp = block::REDSTONE_LAMP;
+        lv.rules.on_place.insert(
+            SPOT,
+            vec![Act::Schedule(SPOT, lamp, 2, TickPriority::Normal)],
+        );
+        lv.tick();
+        lv.input(A, place(lamp.default_state()));
+        for _ in 0..2 {
+            lv.tick();
+        }
+        let fired: Vec<i64> = lv
+            .rules
+            .log
+            .iter()
+            .filter_map(|e| match e {
+                Ev::Tick { time, .. } => Some(*time),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(fired, [3]);
+    }
+
+    // 壊す: 空気をフラグ 3 で書く (V04 §4.10)。撤去フックは書き込みの中で、NC より先に走る (V04 §4.2 の手順 7)。
+    // NC の送り元は壊したブロック (V15 §5.5)。間接 SU に渡るフラグは 3 から 1 を落とした 2。
+    #[test]
+    fn break_writes_air_with_flag_3() {
+        let mut lv = level();
+        let stone = block::STONE.default_state();
+        lv.set_state_raw(SPOT, stone);
+        let out = lv.input(A, Input::Break { pos: SPOT });
+        assert_eq!(
+            out,
+            InputOutcome {
+                accepted: true,
+                status: Status::OK
+            }
+        );
+        assert_eq!(lv.get_state(SPOT), StateId::AIR);
+        let log = &lv.rules.log;
+        assert_eq!(
+            log[0],
+            Ev::Remove {
+                pos: SPOT,
+                old: stone,
+                moved: false
+            }
+        );
+        assert!(matches!(log[2], Ev::Nc { src, .. } if src == block::STONE));
+        assert_eq!(log.iter().filter(|e| matches!(e, Ev::Nc { .. })).count(), 6);
+        assert!(log.iter().any(|e| matches!(
+            e,
+            Ev::Indirect { state, flags, .. } if *state == stone && *flags == UpdateFlags(2)
+        )));
+        // 置いた時の状態と支えの口は、壊すでは呼ばない。
+        assert!(lv.rules.asked.borrow().is_empty());
+    }
+
+    // 空気を壊しても何も起きない。範囲も確かめない: 高さの外と格子の枠の外は読むと空気で、
+    // 同じ状態の書き込みは格子に触る前に戻る (V04 §5.1)。だから SAFETY も立たず、格子も広がらない。
+    #[test]
+    fn breaking_air_does_nothing_anywhere() {
+        let mut lv = level();
+        let stone = block::STONE.default_state();
+        lv.set_state_raw(SPOT, stone);
+        lv.drain_changes();
+        // 格子の枠 (1 辺 256 セクション) の外。ここへ石を置く書き込みなら SAFETY が立つ。
+        let far = Pos::new(16 * 256, 0, 0);
+        assert!(!lv.can_set_all_raw([(far, stone)]));
+        for pos in [
+            Pos::new(3, 3, 3),
+            Pos::new(0, 320, 0),
+            Pos::new(0, -65, 0),
+            far,
+            Pos::new(i32::MAX, i32::MAX, i32::MIN),
+        ] {
+            let out = lv.input(A, Input::Break { pos });
+            assert_eq!(
+                out,
+                InputOutcome {
+                    accepted: false,
+                    status: Status::OK
+                },
+                "{pos:?}"
+            );
+        }
+        assert_eq!(lv.rules.log, []);
+        assert!(lv.drain_changes().is_empty());
+        assert_eq!(lv.get_state(SPOT), stone);
+        // 対になる事実: 同じ枠の外へ置くと、書き込みまで進んで SAFETY が立つ (wasm の窓口は、置く前に断る)。
+        let out = lv.input(
+            A,
+            Input::Place {
+                pos: far,
+                state: stone,
+            },
+        );
+        assert_eq!(
+            out,
+            InputOutcome {
+                accepted: false,
+                status: Status::SAFETY
+            }
+        );
+        // 高さの外へ置くのは、書き込みの手順 1 が断る。状態コードは立たない。
+        let out = lv.input(
+            A,
+            Input::Place {
+                pos: Pos::new(0, 320, 0),
+                state: stone,
+            },
+        );
+        assert_eq!(
+            out,
+            InputOutcome {
+                accepted: false,
+                status: Status::OK
+            }
+        );
+        assert_eq!(lv.rules.log, []);
     }
 }

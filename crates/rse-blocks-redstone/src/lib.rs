@@ -9,11 +9,13 @@
 //!
 //! | モジュール | 素子 | 典拠 |
 //! |---|---|---|
-//! | [`lever`] | レバー (切り替え・信号・取り付け) | V09 §4.1 |
+//! | [`lever`] | レバー (切り替え・信号・取り付け・設置) | V09 §3.1・§4.1 |
 //! | [`wire`] | ダスト (接続の形・信号の出力・既定の評価器・設置と除去・支え) | V06 |
 //! | [`lamp`] | ランプ (点灯はその場・消灯は 4gt の予約 tick) | V11 §4.1・§5.1 |
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
+// doctest には crate の forbid が効かないので、doctest にも付ける (docs/wasm-abi.md §5)。今は doctest が無い。
+#![doc(test(attr(forbid(unsafe_code))))]
 
 pub mod lamp;
 pub mod lever;

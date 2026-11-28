@@ -16,11 +16,13 @@
 //! | [`ticks`] | 予約 tick (2 層・予約順・重複の抑止) | V02・19 §3.4 |
 //! | [`events`] | ブロックイベント (挿入順の列) | V03・19 §3.5 |
 //! | [`phases`] | 相の表と 1 tick・凍結 | V01 §2.3・§7.1・19 §4.1 |
-//! | [`input`] | tick の外の入力と区間の印 | V01 §2.4・19 §4.1 |
+//! | [`input`] | tick の外の入力と区間の印。使う・置く・壊す | V01 §2.4・§4.10・19 §4.1・V06 §4.14・V04 §4.10 |
 //! | [`signal`] | 信号の問い合わせ (弱い・強い・導体) | V05 §2.3・§4.1 |
 //! | [`status`] | 状態コード | 19 §2.5 |
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
+// doctest には crate の forbid が効かないので、doctest にも付ける (docs/wasm-abi.md §5)。今は doctest が無い。
+#![doc(test(attr(forbid(unsafe_code))))]
 
 extern crate alloc;
 
@@ -45,7 +47,7 @@ pub use input::{Input, InputOutcome, InputSection};
 pub use level::{Config, Level};
 pub use phases::{PHASES, Phase};
 pub use rse_java::{Dir, JavaHashSet, Pos};
-pub use rules::Rules;
+pub use rules::{Placement, Rules};
 pub use set_block::UpdateFlags;
 pub use state::{Behavior, BlockId, StateId, SupportType};
 pub use status::Status;
