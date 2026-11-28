@@ -109,7 +109,7 @@ impl Rules for Bench {
             Behavior::Inert if requested.is_air() => Placement::Refused,
             Behavior::Inert if requested.block().state_count() == 1 => Placement::State(requested),
             Behavior::Wire => Placement::State(wire::placement_state(lv, pos)),
-            Behavior::Lever => lever::placement_state(requested),
+            Behavior::Lever => Placement::State(lever::placement_state(requested)),
             Behavior::Lamp => Placement::State(lamp::placement_state(lv, pos)),
             _ => Placement::Unimplemented,
         }

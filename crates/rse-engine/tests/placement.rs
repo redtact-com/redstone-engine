@@ -185,20 +185,45 @@ fn refuses_without_support_or_on_a_block() {
     assert_eq!(at(&world, Pos::new(1, 0, 1)), "stone");
     // 空気は置く物ではない。
     assert_eq!(place(&mut world, Pos::new(2, 1, 2), "air"), REFUSED);
-    // 入った状態のレバーの要求は、書かずに UNIMPLEMENTED (UNVERIFIED。lever.rs の注)。
-    let out = place(
-        &mut world,
-        Pos::new(2, 1, 2),
-        "lever[face=floor,facing=north,powered=true]",
-    );
-    assert_eq!(
-        out,
-        InputOutcome {
-            accepted: false,
-            status: Status::UNIMPLEMENTED
-        }
-    );
     assert_eq!(at(&world, Pos::new(2, 1, 2)), "air");
+}
+
+// レバーは、入った状態を要求しても切れて置かれる。受電を読まないので、強充電された支えに付けても、
+// 入ったレバー (信号源) の隣に置いても同じである (V09 §4.1)。予約を積まず、置いたマスのほかは何も変わらない。
+#[test]
+fn powered_lever_requests_are_placed_off() {
+    let mut world = floored(5);
+    // 入ったレバー A (床置き) が、真下の石を強充電する。
+    let a = Pos::new(1, 1, 1);
+    placed(&mut world, a, LEVER_OFF);
+    assert!(world.input(InputSection::A, Input::Use { pos: a }).accepted);
+    assert_eq!(world.direct_signal_to(Pos::new(1, 0, 1)), 15);
+    world.drain_changes();
+    for (pos, request, expect) in [
+        // 強充電された石の下面に、天井付けで付ける。
+        (
+            Pos::new(1, -1, 1),
+            "lever[face=ceiling,facing=west,powered=true]",
+            "lever[face=ceiling,facing=west,powered=false]",
+        ),
+        // 入ったレバーの東隣に、床置きで置く。
+        (
+            Pos::new(2, 1, 1),
+            "lever[face=floor,facing=south,powered=true]",
+            "lever[face=floor,facing=south,powered=false]",
+        ),
+    ] {
+        placed(&mut world, pos, request);
+        assert_eq!(at(&world, pos), expect);
+        let changed: Vec<(Pos, String)> = world
+            .drain_changes()
+            .iter()
+            .map(|c| (c.pos, c.state.to_string()))
+            .collect();
+        assert_eq!(changed, [(pos, expect.to_string())], "{request}");
+        assert_eq!(world.scheduled_tick_count(), 0, "{request}");
+    }
+    assert_eq!(at(&world, a), "lever[face=floor,facing=north,powered=true]");
 }
 
 // 受電した所に置いたランプは、点いた状態で置かれる。予約は積まない (V11 §4.1)。

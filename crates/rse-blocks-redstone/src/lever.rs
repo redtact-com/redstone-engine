@@ -3,12 +3,13 @@
 //! - 信号: 入っていれば、弱い信号 15 を全方向へ、強い信号 15 を取り付け先 (支え) にだけ出す。
 //! - 右クリックで必ず切り替わる。予約 tick は使わない。
 //! - 取り付け先の面が支えでなくなると壊れる。
-//! - 置く時は、入力が運んだ face と facing をそのまま使う。置けるのは、取り付け先の面が支える時だけ。
+//! - 置く時は、入力が運んだ face と facing をそのまま使い、いつも切れた状態で置く。置けるのは、取り付け先の面が
+//!   支える時だけ。
 //!
 //! 音と GameEvent は持たない (乱数を使わないので、順にも効かない。V09 §4.1)。
 
 use rse_core::state::block;
-use rse_core::{Dir, Level, Placement, Pos, Rules, StateId, SupportType, UpdateFlags};
+use rse_core::{Dir, Level, Pos, Rules, StateId, SupportType, UpdateFlags};
 
 // プロパティの添字 (名前順: face・facing・powered。V05 §3.3)。
 const FACE: usize = 0;
@@ -19,6 +20,7 @@ const FACE_FLOOR: u8 = 0;
 const FACE_CEILING: u8 = 2;
 // 真偽の値の添字 (true・false)。
 const TRUE: u8 = 0;
+const FALSE: u8 = 1;
 
 /// 入っているか。
 #[inline]
@@ -56,22 +58,19 @@ pub fn can_survive<R: Rules>(lv: &Level<R>, pos: Pos, state: StateId) -> bool {
         .is_face_sturdy(toward_lever, SupportType::Full)
 }
 
-/// 設置の時の状態 (V09 §3.1。FaceAttachedHorizontalDirectionalBlock.getStateForPlacement に当たる)。
-/// `requested` は入力が運んだレバーの状態。face と facing は、そのまま使う。置かれるレバーは切れている。
+/// 設置の時の状態 (V09 §4.1 の「置いた時の状態」。FaceAttachedHorizontalDirectionalBlock.getStateForPlacement に当たる)。
+/// `requested` は入力が運んだレバーの状態。face と facing は、そのまま使う。powered は読まず、いつも偽にする。
 ///
+/// - powered: 実機は受電を読まずに、切れたレバーを置く (V09 §4.1)。支えが強充電されていても、隣に信号源があっても
+///   同じである。レバーは設置フックも setPlacedBy も持たないので、置いた後に自分で入ることも無い。
+/// - face と facing: この入力は、呼び手から受ける。押した面と見ている向きから決める形 (候補の 6 方向を順に試し、
+///   支えのある最初の向きを使う。V09 §4.1) は持たない。だから要求の向きに支えが無い時は、別の向きを探さずに
+///   置かない (置く手順の [`can_survive`] が断る)。
+/// - 床置き・天井付けの facing は「置いた人が見ている水平の向き」(V09 §4.1) で、挙動には効かない。取り付けの向きは
+///   face だけで決まり ([`connected_direction`])、facing を読むのは実験の世界の Orientation だけである。
 /// - 取り付いていられるかは見ない。置く手順が、返した状態を [`can_survive`] に掛ける。
-/// - 床置き・天井付けの facing は「置いた人の向き」(V09 §3.1) で、挙動には効かない。取り付けの向きは face だけで決まり
-///   ([`connected_direction`])、facing を読むのは実験の世界の Orientation だけである (V09 §4.1)。
-/// - UNVERIFIED: 押した面と見ている向きから face と facing を決める規則は、メモに無い。だから決めた後の値を入力で受ける
-///   (redstone-sim#446 の質問 2)。実機は取り付けられる向きを探すので、要求の向きに支えが無い時に
-///   別の向きで置かれることがありうる。ここでは置かない。
-/// - UNVERIFIED: 入った状態 (powered が真) で置く組はメモに無いので、書かずに「規則が無い」を返す (同じ質問 2)。
-pub fn placement_state(requested: StateId) -> Placement {
-    if is_powered(requested) {
-        Placement::Unimplemented
-    } else {
-        Placement::State(requested)
-    }
+pub fn placement_state(requested: StateId) -> StateId {
+    requested.with_value(POWERED, FALSE)
 }
 
 /// 弱い信号 (V09 §4.1。LeverBlock.getSignal)。入っていれば、向きによらず 15。
@@ -301,17 +300,14 @@ mod tests {
         assert_eq!(at(&lv, lamp), "redstone_lamp[lit=false]");
     }
 
-    // 設置の時の状態: face と facing は要求のまま。入った状態の要求は「規則が無い」(UNVERIFIED)。
+    // 設置の時の状態: face と facing は要求のまま。powered は要求によらず偽 (V09 §4.1)。
     #[test]
-    fn placement_keeps_face_and_facing() {
+    fn placement_keeps_face_and_facing_and_is_off() {
         for face in ["floor", "wall", "ceiling"] {
             for facing in ["north", "south", "west", "east"] {
                 let off = lever(&format!("lever[face={face},facing={facing},powered=false]"));
-                assert_eq!(placement_state(off), Placement::State(off));
-                assert_eq!(
-                    placement_state(off.cycle(POWERED)),
-                    Placement::Unimplemented
-                );
+                assert_eq!(placement_state(off), off);
+                assert_eq!(placement_state(off.cycle(POWERED)), off);
             }
         }
     }
@@ -344,15 +340,17 @@ mod tests {
         put(&mut lv, spot.offset(Dir::South), stone());
         assert!(lv.input(InputSection::A, place).accepted);
         assert_eq!(at(&lv, spot), "lever[face=wall,facing=north,powered=false]");
-        // 入った状態の要求は書かずに、UNIMPLEMENTED を返す。
+        // 入った状態の要求も、切れて置かれる (V09 §4.1)。
         let on = Input::Place {
             pos: P.offset(Dir::West),
             state: floor.cycle(POWERED),
         };
         put(&mut lv, P.offset(Dir::West).offset(Dir::Down), stone());
         let out = lv.input(InputSection::A, on);
-        assert!(!out.accepted);
-        assert_eq!(out.status, rse_core::Status::UNIMPLEMENTED);
-        assert_eq!(at(&lv, P.offset(Dir::West)), "air");
+        assert!(out.accepted && out.status.is_ok());
+        assert_eq!(
+            at(&lv, P.offset(Dir::West)),
+            "lever[face=floor,facing=east,powered=false]"
+        );
     }
 }

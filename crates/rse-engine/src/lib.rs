@@ -205,9 +205,9 @@ impl Rules for Engine {
             // ダストは要求のプロパティを読まず、周りから形を決める。power は 0 (V06 §4.4)。
             #[cfg(feature = "redstone")]
             Behavior::Wire => Placement::State(wire::placement_state(lv, pos)),
-            // レバーは face と facing を要求のまま使う (V09 §3.1)。
+            // レバーは face と facing を要求のまま使い、powered は要求によらず偽にする (V09 §4.1)。
             #[cfg(feature = "redstone")]
-            Behavior::Lever => lever::placement_state(requested),
+            Behavior::Lever => Placement::State(lever::placement_state(requested)),
             // ランプは、置く位置が受電していれば点いて置かれる (V11 §4.1)。
             #[cfg(feature = "redstone")]
             Behavior::Lamp => Placement::State(lamp::placement_state(lv, pos)),
@@ -218,15 +218,13 @@ impl Rules for Engine {
     fn can_survive(lv: &Level<Self>, pos: Pos, state: StateId) -> bool {
         let _ = (lv, pos);
         match state.behavior() {
-            // 材料は支えの条件を持たない。
-            // UNVERIFIED: 石とランプが存続の条件を持たないことは、支えを求める側の表 (V05 §4.7.4・付録 C.1) に
-            // どちらも無いことと、「存続の判定を上書きしないブロックは常に真」という付録 C.3 の書き方から読んだ。
-            // 2 つを名指しで書いた節は無い (redstone-sim#446 の質問 4)。
+            // 材料 (石) は canSurvive を上書きせず、既定の「常に真」を使う (V11 §4.1)。
             Behavior::Inert => true,
             #[cfg(feature = "redstone")]
             Behavior::Wire => wire::can_survive(lv, pos),
             #[cfg(feature = "redstone")]
             Behavior::Lever => lever::can_survive(lv, pos, state),
+            // ランプも上書きしない。宙にも置ける (V11 §4.1)。
             #[cfg(feature = "redstone")]
             Behavior::Lamp => true,
             // 未実装の種類は、置いた時の状態の口が先に止めるので、置く手順からはここへ来ない。
