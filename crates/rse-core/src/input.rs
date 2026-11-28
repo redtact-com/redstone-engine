@@ -19,7 +19,8 @@
 //! 3. その状態が居られるか ([`Rules::can_survive`]。V07 §4.13 の手順 1)。
 //! 4. フラグ 11 で書く (V06 §4.14・V07 §4.13 の手順 2・V08 §4.1.7 の表)。
 //!
-//! - 書き込みの順 (設置フック → NC → SU) は [`crate::set_block`] のふつうの手順のまま。設置フックの中で
+//! - 書き込みの順 (古いブロックの撤去フック → 設置フック → NC → CU → 古い状態の間接 SU → 6 方向の SU →
+//!   新しい状態の間接 SU。V04 §7.2 の 1) は [`crate::set_block`] のふつうの手順のまま。設置フックの中で
 //!   状態が変わると外側の NC と SU が出ない (V06 §4.14 の落とし穴) のも、手順 5 の読み直しが受け持つ。
 //! - 置く状態を周りの形状更新で直す段は通らない (V08 §4.2.5 の表)。だから、置いた時の状態は 2 の口だけで決まる。
 //! - /setblock の経路 (V04 §4.11) とは別物である。あちらは書く前に周りに合わせて直し、フラグ 2 + 256 で書き、
@@ -35,8 +36,10 @@
 //! 空気をフラグ 3 で書く ([`Level::remove_block`]。V04 §4.10・V15 §5.5・V08 §4.1.7 の表)。
 //! 撤去フックは書き込みの中で走る (V04 §4.2 の手順 7。ダストは V06 §4.15、入ったレバーは V09 §4.1)。
 //!
-//! - 範囲は確かめない。高さの外も格子の枠の外も、読むと空気である。空気を壊すのは同じ状態の書き込みで、
-//!   書き込みは同じ状態なら格子に触る前に戻る (V04 §5.1)。だから何も起きず、SAFETY も立たない。
+//! - 範囲は確かめない。どちらの外でも何も起きず、SAFETY も立たない。理由は外ごとに違う。
+//!   - 高さの外: 書き込みの手順 1 (高さの確かめ。V04 §4.1) が、何もせずに偽を返す。
+//!   - 格子の枠の外: 読むと空気なので、空気を壊すのは同じ状態の書き込みになる。書き込みは、同じ状態なら
+//!     格子に触る前に戻る (V04 §5.1)。
 //! - ドロップ・GameEvent は持たない。
 //! - UNVERIFIED: プレイヤーの破壊の中身を「空気をフラグ 3 で書くだけ」としたのは、V15 §5.5 と V08 §4.1.7 の
 //!   1 行ずつから組んだ (redstone-sim#446 の質問 3)。
@@ -57,7 +60,7 @@ pub enum InputSection {
     B5 = 0,
     /// コマンド (setblock)。
     C = 1,
-    /// プレイヤーの操作 (右クリック・設置)。
+    /// プレイヤーの操作 (右クリック・設置・破壊)。
     A = 2,
     /// 関数 (今は使わない)。
     B1 = 3,
@@ -134,7 +137,8 @@ impl<R: Rules> Level<R> {
 
     /// 置く (冒頭の注の 1〜4)。書けたら真。
     fn place(&mut self, pos: Pos, requested: StateId) -> bool {
-        // 1〜3 は `&self` で読むだけ。断る時に、世界にもフックにも触れない。
+        // 2・3 の口には `&Level` だけを渡す。1〜3 の確かめの間に骨格が書くのは状態コード (UNIMPLEMENTED) だけで、
+        // 断る時に、世界にもフックにも触れない。
         let Some(state) = self.placement_for(pos, requested) else {
             return false;
         };
@@ -322,17 +326,19 @@ mod tests {
     }
 
     // 置く: 置いた時の状態 → 支えの順に聞いてから、1 回だけフラグ 11 で書く。聞く間は、フックも更新も 1 つも無い。
-    // 支えの口には、置いた時の状態の口が返した状態が渡る (要求の状態ではない)。
+    // 置いた時の状態の口には、要求の状態がプロパティごとそのまま渡る (既定でない状態を要求し、骨格が既定の状態に
+    // 直して渡していないことを見る)。支えの口には、置いた時の状態の口が返した状態が渡る (要求の状態ではない)。
     // 書き込みはふつうの順 (V04 §7.2 の 1): 撤去フック (空気) → 設置フック → NC 6 件 (送り元は古いブロック = 空気。
     // V15 §5.5) → 古い状態の間接 SU → SU 6 件 → 新しい状態の間接 SU。間接 SU に渡るフラグは 11 から 1 を落とした 10。
     #[test]
     fn place_asks_then_writes_once_with_flag_11() {
         let mut lv = level();
+        // 要求は既定でない状態 (点いたランプ)、口の答えはそれと違う状態 (消えたランプ = 既定の状態)。
+        let requested = lit_lamp();
         let lamp = block::REDSTONE_LAMP.default_state();
-        lv.rules
-            .placement
-            .insert(SPOT, Placement::State(lit_lamp()));
-        let out = lv.input(A, place(lamp));
+        assert_ne!(requested, lamp);
+        lv.rules.placement.insert(SPOT, Placement::State(lamp));
+        let out = lv.input(A, place(requested));
         assert_eq!(
             out,
             InputOutcome {
@@ -340,18 +346,18 @@ mod tests {
                 status: Status::OK
             }
         );
-        assert_eq!(lv.get_state(SPOT), lit_lamp());
+        assert_eq!(lv.get_state(SPOT), lamp);
         assert_eq!(
             *lv.rules.asked.borrow(),
             [
                 Asked::Placement {
                     pos: SPOT,
-                    requested: lamp,
+                    requested,
                     hooks_before: 0
                 },
                 Asked::Survive {
                     pos: SPOT,
-                    state: lit_lamp(),
+                    state: lamp,
                     hooks_before: 0
                 },
             ]
@@ -367,7 +373,7 @@ mod tests {
                 },
                 Ev::Place {
                     pos: SPOT,
-                    state: lit_lamp(),
+                    state: lamp,
                     old: StateId::AIR,
                     moved: false
                 },
@@ -392,7 +398,7 @@ mod tests {
             indirect,
             [
                 (StateId::AIR, UpdateFlags(10), 511),
-                (lit_lamp(), UpdateFlags(10), 511)
+                (lamp, UpdateFlags(10), 511)
             ]
         );
         assert_eq!(log.iter().filter(|e| matches!(e, Ev::Su { .. })).count(), 6);
@@ -489,7 +495,8 @@ mod tests {
     }
 
     // 壊す: 空気をフラグ 3 で書く (V04 §4.10)。撤去フックは書き込みの中で、NC より先に走る (V04 §4.2 の手順 7)。
-    // NC の送り元は壊したブロック (V15 §5.5)。間接 SU に渡るフラグは 3 から 1 を落とした 2。
+    // NC の送り元は壊したブロック (V15 §5.5)。間接 SU は古い状態 → 新しい状態の 2 回で、渡るフラグは 3 から 1 を
+    // 落とした 2、残りの深さは 511 (最初の書き込みは 512 から 1 減らして渡す。V04 §4.7)。
     #[test]
     fn break_writes_air_with_flag_3() {
         let mut lv = level();
@@ -515,16 +522,29 @@ mod tests {
         );
         assert!(matches!(log[2], Ev::Nc { src, .. } if src == block::STONE));
         assert_eq!(log.iter().filter(|e| matches!(e, Ev::Nc { .. })).count(), 6);
-        assert!(log.iter().any(|e| matches!(
-            e,
-            Ev::Indirect { state, flags, .. } if *state == stone && *flags == UpdateFlags(2)
-        )));
+        let indirect: Vec<(StateId, UpdateFlags, i32)> = log
+            .iter()
+            .filter_map(|e| match e {
+                Ev::Indirect {
+                    state, flags, left, ..
+                } => Some((*state, *flags, *left)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            indirect,
+            [
+                (stone, UpdateFlags(2), 511),
+                (StateId::AIR, UpdateFlags(2), 511)
+            ]
+        );
+        assert_eq!(log.iter().filter(|e| matches!(e, Ev::Su { .. })).count(), 6);
         // 置いた時の状態と支えの口は、壊すでは呼ばない。
         assert!(lv.rules.asked.borrow().is_empty());
     }
 
-    // 空気を壊しても何も起きない。範囲も確かめない: 高さの外と格子の枠の外は読むと空気で、
-    // 同じ状態の書き込みは格子に触る前に戻る (V04 §5.1)。だから SAFETY も立たず、格子も広がらない。
+    // 空気を壊しても何も起きない。範囲も確かめない。高さの外は書き込みの手順 1 が断り、格子の枠の外は
+    // 読むと空気なので、同じ状態の書き込みが格子に触る前に戻る (V04 §5.1)。どちらも SAFETY は立たず、格子も広がらない。
     #[test]
     fn breaking_air_does_nothing_anywhere() {
         let mut lv = level();

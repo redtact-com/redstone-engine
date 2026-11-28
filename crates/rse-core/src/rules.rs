@@ -91,6 +91,11 @@ pub trait Rules: Sized {
     /// 世界を書き換えない。置く手順 ([`crate::input`]) は、ここと [`Rules::can_survive`] を済ませてから 1 回だけ書く。
     /// 断る時に何も書かないことを、引数の型で守る。状態コードも立てられないので、規則が無い時は
     /// [`Placement::Unimplemented`] を返し、骨格に立てさせる。
+    ///
+    /// この形 (`&Level` で読むだけ・置く手順の書き込みは 1 回) が前提にしているのは、置く状態を、世界を読むだけで
+    /// 決められる素子である。乱数を引かず、予約を積まず、先にほかのマスを書かない。縦切りの 3 素子と石はこれに当たる。
+    /// 置いた時の規則が乱数を引く素子 (V11 付録 F.5 の GrowingPlantBlock) や、置く状態を決める時に予約を積む素子
+    /// (V02 §4.9 の表のサンゴ類の CoralBlock) を入れる時は、口の形を見直す。
     fn placement_state(lv: &Level<Self>, pos: Pos, requested: StateId) -> Placement;
 
     /// `state` が `pos` に居られるか (V07 §4.13・V06 §4.5・V09 §4.1。BlockBehaviour.canSurvive に当たる)。

@@ -547,7 +547,14 @@ mod tests {
     #[test]
     fn initial_boards_can_be_built_by_placing_in_any_order() {
         let orders = permutations(5);
-        assert_eq!(orders.len(), 120);
+        // 120 通りが全部違う順であること (数だけでは、同じ順が重なっても通る)。
+        let distinct: std::collections::BTreeSet<&Vec<usize>> = orders.iter().collect();
+        assert_eq!((orders.len(), distinct.len()), (120, 120));
+        assert!(orders.iter().all(|o| {
+            let mut sorted = o.clone();
+            sorted.sort();
+            sorted == [0, 1, 2, 3, 4]
+        }));
         for json in [LEVER_WIRE_LAMP, LAMP_OFF_DELAY] {
             let fixture = Fixture::parse(json).unwrap();
             let (floor, upper): (Vec<_>, Vec<_>) = fixture

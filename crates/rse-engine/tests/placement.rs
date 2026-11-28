@@ -124,6 +124,34 @@ fn shape_follows_neighbors_as_they_come_and_go() {
     assert_eq!(world.game_time(), 0);
 }
 
+// 横からの形状更新は、保持値が十字でなく、その方向の接続の有無が変わらなければ、その方向だけを直す (V06 §4.6 の手順 2)。
+// 他の 3 方向の保持値には触れないので、実情とずれた保持値はそのまま残る。全部を計算し直す形 (V06 §4.3) なら、
+// 孤立したダストは十字になってしまう。
+// - 孤立なのに東西の直線を保持したダストを更新なしで置き、北にランプ・南に石・西にダストを置く。
+//   北と南は none のまま、西は side のままなので、東西の直線が残る (孤立の間も十字にならない)。
+// - 対になる形: 南北の直線を保持した孤立のダストの西にダストを置くと、西の接続の有無が変わるので手順 3 になり、
+//   全部を計算し直す。生の接続は西の 1 本なので、東西の直線になる (保持していた南北は消える)。
+#[test]
+fn side_shape_update_fixes_only_that_direction() {
+    let mut world = floored(5);
+    let a = Pos::new(2, 1, 2);
+    let line_x = wire(false, true, false, true, 0);
+    assert!(world.set_state_raw(a, parse(&line_x)));
+    world.drain_changes();
+    placed(&mut world, Pos::new(2, 1, 1), "redstone_lamp");
+    assert_eq!(at(&world, a), line_x);
+    placed(&mut world, Pos::new(2, 1, 3), "stone");
+    assert_eq!(at(&world, a), line_x);
+    placed(&mut world, Pos::new(1, 1, 2), "redstone_wire");
+    assert_eq!(at(&world, a), line_x);
+
+    let b = Pos::new(4, 1, 0);
+    assert!(world.set_state_raw(b, parse(&wire(true, false, true, false, 0))));
+    placed(&mut world, Pos::new(3, 1, 0), "redstone_wire");
+    assert_eq!(at(&world, b), line_x);
+    assert_eq!(world.scheduled_tick_count(), 0);
+}
+
 // 支えの無い所と、空気でない所には置けない。断った時は何も変わらず、状態コードも立たない。
 #[test]
 fn refuses_without_support_or_on_a_block() {
@@ -180,10 +208,16 @@ fn placing_next_to_power_takes_it_at_once() {
     let mut world = floored(5);
     let lever = Pos::new(2, 1, 2);
     placed(&mut world, lever, LEVER_OFF);
-    // 切れている間に置いたランプは消えている。
+    // 切れている間に置いたランプは消えている。点いた状態を要求しても、要求の lit は読まずに消えて置かれ、
+    // 消えるための予約も積まない (V11 §4.1。「どの状態を渡しても同じ」の約束)。
     let west = Pos::new(1, 1, 2);
-    placed(&mut world, west, "redstone_lamp");
+    placed(&mut world, west, "redstone_lamp[lit=true]");
     assert_eq!(at(&world, west), "redstone_lamp[lit=false]");
+    assert_eq!(world.scheduled_tick_count(), 0);
+    let far = Pos::new(4, 1, 4);
+    placed(&mut world, far, "redstone_lamp[lit=true]");
+    assert_eq!(at(&world, far), "redstone_lamp[lit=false]");
+    assert_eq!(world.scheduled_tick_count(), 0);
     assert!(
         world
             .input(InputSection::A, Input::Use { pos: lever })
