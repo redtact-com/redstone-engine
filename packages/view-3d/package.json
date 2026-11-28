@@ -8,6 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@redstone-engine/board": "0.0.0",
     "deepslate": "0.25.1",
     "gl-matrix": "^3.4.3"
   },

@@ -882,11 +882,14 @@ function exportedNamesOf(text: string): { names: string[]; star: number } {
   return { names: names.sort(), star }
 }
 
-/** 窓口として書き出す名前 (足す・外す時はここも直す) */
+/**
+ * 窓口として書き出す名前 (足す・外す時はここも直す)。
+ * 盤面の型 (Board・BoardBounds・CellChange・PickRole・PickRoleFn・Pos3) は board が書き出す (#14)
+ */
 const PUBLIC_NAMES = [
-  'ApplyResult', 'AssetState', 'Board', 'BoardBounds', 'CameraInput', 'CameraState', 'CellChange',
+  'ApplyResult', 'AssetState', 'CameraInput', 'CameraState',
   'IsometricView', 'IsometricViewHandle', 'IsometricViewProps', 'MCMETA_BASE', 'PICK_PASS_THROUGH',
-  'PickRole', 'PickRoleFn', 'Pos3', 'VIEWER_FAR', 'VIEWER_FOV_DEG', 'VIEWER_NEAR',
+  'VIEWER_FAR', 'VIEWER_FOV_DEG', 'VIEWER_NEAR',
   'cellKey', 'fitDistance', 'maxZoomOut', 'normalizeState', 'pickRoleFrom',
 ].sort()
 

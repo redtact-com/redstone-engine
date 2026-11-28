@@ -1,45 +1,18 @@
 /**
  * view-3d の窓口の型。
  *
- * 盤面は **blockstate の文字列** で受ける (engine-js の `StateTable.name` の形)。エンジンの型にも
- * deepslate の型にも依らないので、描画の中身を替えても窓口は変わらない。
- * board のパッケージができるまではここに置き、6 本目で board へ移す (docs/architecture.md §1。view-3d は board の型には依ってよい)。
- */
-
-/** 世界の座標 [x, y, z] */
-export type Pos3 = [number, number, number]
-
-/** 範囲。どの軸も [最小, 最大] で、両端を含む */
-export interface BoardBounds {
-  readonly x: readonly [number, number]
-  readonly y: readonly [number, number]
-  readonly z: readonly [number, number]
-}
-
-/**
- * 描く盤面。
+ * 盤面・変化・押した時の扱いの型は board にある (#14。docs/architecture.md §1。view-3d は board の型だけに依る)。
+ * ここでは view-3d の中の `./types` の import のために出し直し、自分では描く側の結果 (`ApplyResult`) だけを持つ。
+ * アプリは盤面の型を board から読む (view-3d の index.ts は board の型を書き出さない)。
  *
- * - `blocks` の鍵は `"x,y,z"` (世界の座標。`cellKey` で作る)、値は blockstate の文字列。
- *   先頭の `minecraft:` は有っても無くてもよく、プロパティの並びも問わない (`normalizeState` でそろえる)。
- * - air・cave_air・void_air は何も無いマスとして扱う (書かなくてもよい)。
- * - 範囲の外のマスと、鍵が `"x,y,z"` の形 (どの部分も `/^-?\d+$/`) でないマスは描かない。
- *   その数は `IsometricView` の `onBoardApplied` で知らせる (`ApplyResult.outside`)。
+ * 盤面を描く時の決まり (board の `Board` の注の「描く側」は view-3d のこと):
+ * - 先頭の `minecraft:` の有無とプロパティの並びは `normalizeState` でそろえる。`PickRoleFn` にも、その形で渡す。
+ *   押せるかを素通りの一覧で済ませるなら、`PickRoleFn` は `pickRoleFrom(isTarget)` で作る
+ * - 範囲の外のマスと、鍵が `"x,y,z"` の形でないマスは描かず、その数を `IsometricView` の `onBoardApplied` で知らせる
+ *   (`ApplyResult.outside`)
  */
-export interface Board {
-  readonly bounds: BoardBounds
-  readonly blocks: ReadonlyMap<string, string>
-}
 
-/**
- * 1 マスの変化。`state` は blockstate の文字列 (`Board.blocks` の値と同じ決まり)。
- * engine-js の変化の窓から作る時は、窓を読み切ってから渡す (窓は次に窓口を呼ぶと使えない。docs/wasm-abi.md §4)。
- */
-export interface CellChange {
-  readonly x: number
-  readonly y: number
-  readonly z: number
-  readonly state: string
-}
+export type { Board, BoardBounds, CellChange, PickRole, PickRoleFn, Pos3 } from '@redstone-engine/board'
 
 /** 盤面の差し替え (`onBoardApplied`) と `applyChanges` の結果 */
 export interface ApplyResult {
@@ -54,19 +27,3 @@ export interface ApplyResult {
    */
   readonly outside: number
 }
-
-/**
- * 3D で押した時の、マスの扱い。
- *  - `target`: 押せる。1 マス全体を当たりにする (絵が数 px のレバーも押せるように)
- *  - `pass`:   素通り。細い・透けるので奥の物を隠さない。それ自体は押せない
- *  - `block`:  遮る。奥の物は押せない (見えない物は押せない)
- *
- * 空のマスは素通りで、`PickRoleFn` を呼ばない。
- */
-export type PickRole = 'target' | 'pass' | 'block'
-
-/**
- * マスの状態 (正規化した blockstate の文字列。`normalizeState` の形) から扱いを決める関数。
- * 押せるかどうかはアプリが決める。素通りの一覧で済ませるなら `pickRoleFrom(isTarget)` で作る。
- */
-export type PickRoleFn = (state: string) => PickRole
