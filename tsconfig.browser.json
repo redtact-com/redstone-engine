@@ -1,0 +1,16 @@
+{
+  // ブラウザで組む入口の型検査 (#14。PR #10 の「後で」)。@types/node を読まないので、process・Buffer・node: の物は通らない。
+  // 対象は engine-js の src (Node 用の node.ts を除く)・board と view-3d の src。試験は除く (試験は tsconfig.json で見る)
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  "include": [
+    "packages/engine-js/src/**/*.ts",
+    "packages/board/src/**/*.ts",
+    "packages/view-3d/src/**/*.ts",
+    "packages/view-3d/src/**/*.tsx"
+  ],
+  "exclude": ["packages/engine-js/src/node.ts", "packages/*/src/**/*.test.ts", "packages/*/src/**/*.test.tsx"]
+}

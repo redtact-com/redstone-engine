@@ -14,8 +14,8 @@
 | crates/rse-wasm | wasm の窓口 (C ABI)。unsafe はここだけ | rse-engine |
 | crates/rse-cli | native の道具 (fixture の実行器・状態表の書き出し)。serde はここだけ | rse-engine |
 | packages/engine-js | wasm の読み込み・世界のハンドル・変化の窓・状態表 (TS)。窓口の決まりは docs/wasm-abi.md | rse-wasm の出力 (wasm)・rse-cli の出力 (状態表の JSON) |
-| packages/board | 盤面の型と編集 (置く・消す・選ぶ)。エンジンに依らない | なし |
-| packages/view-3d | 3D の描画と、押した座標の判定 (redstone-sim の packages/viewer を移した。#11)。窓口は blockstate の文字列の盤面 (`board`) と変化の列 (`applyChanges`) で、押せるかはアプリが `pickRole` で渡す。窓口の型は board ができるまで src/types.ts に置き、6 本目で board へ移す | board の型 (今は無し)・deepslate。engine-js には依らない |
+| packages/board | 盤面の型と、盤面の値の操作 (範囲・床・道具ごとの置きたい状態・変化の当て方・鍵・名前の一覧)。エンジンに依らない。置く・消すの結果 (ダストの形ほか) はエンジンの入力が決める。エンジンを呼ぶ編集の流れはアプリが持つ。「選ぶ」は今は無い (使う画面が入る時に足す) | なし |
+| packages/view-3d | 3D の描画と、押した座標の判定 (redstone-sim の packages/viewer を移した。#11)。窓口は blockstate の文字列の盤面 (`board`) と変化の列 (`applyChanges`) で、押せるかはアプリが `pickRole` で渡す。窓口の型 (盤面・変化・押した時の扱い) は board にあり (#14)、view-3d が書き出す型は描く側の物 (`ApplyResult` ほか) だけ | board の型・deepslate。engine-js には依らない |
 | apps/web | アプリ。機能のパッケージを組み立てるだけ | packages/* |
 | conformance/fixtures | 正解の fixture。出どころを SOURCES.md に書く | — |
 

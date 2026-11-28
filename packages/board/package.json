@@ -1,0 +1,10 @@
+{
+  "name": "@redstone-engine/board",
+  "version": "0.0.0",
+  "private": true,
+  "description": "盤面の型と、盤面の値の操作 (範囲・床・道具ごとの置きたい状態・変化の当て方・鍵)。依存は無し",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}

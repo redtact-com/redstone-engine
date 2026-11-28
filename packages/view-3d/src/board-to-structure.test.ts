@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
@@ -777,21 +778,33 @@ describe('WebGL の文脈を手放す (IsometricView の releaseWhenDetached)', 
 const VIEW_DIR = fileURLToPath(new URL('..', import.meta.url))   // packages/view-3d/
 const REPO_DIR = resolve(VIEW_DIR, '../..')
 
-function sourcesOf(dir: string): string[] {
-  return (readdirSync(join(VIEW_DIR, dir), { recursive: true }) as string[])
-    .filter(f => /\.tsx?$/.test(f))
+/** 見張る TS のファイル (.ts・.tsx・.mts・.cts。.d.ts も含む) */
+const SOURCE_FILE = /\.[cm]?tsx?$/
+/** 試験のファイル */
+const TEST_FILE = /\.test\.[cm]?tsx?$/
+
+/** 置き場 (`root` からの `dir`) の下の、見張る TS のファイル (`dir` からの道筋)。`root` は試験で一時のフォルダを渡す */
+function sourcesOf(dir: string, root = VIEW_DIR): string[] {
+  return (readdirSync(join(root, dir), { recursive: true }) as string[])
+    .filter(f => SOURCE_FILE.test(f))
     .map(f => join(dir, f))
 }
 
 interface Specifier {
   readonly spec: string
+  /**
+   * `module`: import などの指定子・`types`: `/// <reference types=… />`・`path`: `/// <reference path=… />`・
+   * `lib`: `/// <reference lib=… />`
+   */
+  readonly kind: 'module' | 'types' | 'path' | 'lib'
   readonly typeOnly: boolean
   readonly line: number
 }
 
 /**
  * ファイルの中の、モジュールを指す所を全部集める (構文木で見るので、引用符の種類・改行・注を問わない)。
- * import・export … from・import type・`import(…)`・`require(…)`・型の中の `import('…')`。指定子が文字列でなければ `<式>`
+ * import・export … from・import type・`import(…)`・`require(…)`・型の中の `import('…')`。指定子が文字列でなければ `<式>`。
+ * 三重スラッシュの指示 (`types=`・`path=`・`lib=`) も集める。設定の `types: []` と `lib` は、ファイルの中の指示を止めない (#14)
  */
 function specifiersOf(file: string, text: string): Specifier[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS)
@@ -803,22 +816,26 @@ function specifiersOf(file: string, text: string): Specifier[] {
       const c = n.importClause
       const named = c?.namedBindings && ts.isNamedImports(c.namedBindings) ? c.namedBindings.elements : null
       const typeOnly = !!c && (c.isTypeOnly || (!c.name && !!named && named.length > 0 && named.every(e => e.isTypeOnly)))
-      out.push({ spec: literal(n.moduleSpecifier), typeOnly, line: at(n) })
+      out.push({ spec: literal(n.moduleSpecifier), kind: 'module', typeOnly, line: at(n) })
     } else if (ts.isExportDeclaration(n) && n.moduleSpecifier) {
       const named = n.exportClause && ts.isNamedExports(n.exportClause) ? n.exportClause.elements : null
       const typeOnly = n.isTypeOnly || (!!named && named.length > 0 && named.every(e => e.isTypeOnly))
-      out.push({ spec: literal(n.moduleSpecifier), typeOnly, line: at(n) })
+      out.push({ spec: literal(n.moduleSpecifier), kind: 'module', typeOnly, line: at(n) })
     } else if (ts.isImportEqualsDeclaration(n) && ts.isExternalModuleReference(n.moduleReference)) {
-      out.push({ spec: literal(n.moduleReference.expression), typeOnly: n.isTypeOnly, line: at(n) })
+      out.push({ spec: literal(n.moduleReference.expression), kind: 'module', typeOnly: n.isTypeOnly, line: at(n) })
     } else if (ts.isCallExpression(n)
       && (n.expression.kind === ts.SyntaxKind.ImportKeyword || (ts.isIdentifier(n.expression) && n.expression.text === 'require'))) {
-      out.push({ spec: literal(n.arguments[0]), typeOnly: false, line: at(n) })
+      out.push({ spec: literal(n.arguments[0]), kind: 'module', typeOnly: false, line: at(n) })
     } else if (ts.isImportTypeNode(n) && ts.isLiteralTypeNode(n.argument)) {
-      out.push({ spec: literal(n.argument.literal), typeOnly: true, line: at(n) })
+      out.push({ spec: literal(n.argument.literal), kind: 'module', typeOnly: true, line: at(n) })
     }
     ts.forEachChild(n, visit)
   }
   visit(sf)
+  const lineOf = (pos: number) => sf.getLineAndCharacterOfPosition(pos).line + 1
+  for (const d of sf.typeReferenceDirectives) out.push({ spec: d.fileName, kind: 'types', typeOnly: true, line: lineOf(d.pos) })
+  for (const d of sf.referencedFiles) out.push({ spec: d.fileName, kind: 'path', typeOnly: true, line: lineOf(d.pos) })
+  for (const d of sf.libReferenceDirectives) out.push({ spec: d.fileName, kind: 'lib', typeOnly: true, line: lineOf(d.pos) })
   return out
 }
 
@@ -837,16 +854,30 @@ const TYPE_ONLY_PACKAGES = new Set(['@redstone-engine/board'])
 
 /** 依存の決まりに外れた所 (file は packages/view-3d/ からの道筋) */
 function dependencyHits(file: string, text: string): string[] {
-  const isTest = /\.test\.tsx?$/.test(file) || file.startsWith(`test${sep}`) || file.startsWith('test/')
+  const isTest = TEST_FILE.test(file) || file.startsWith(`test${sep}`) || file.startsWith('test/')
   const hits: string[] = []
-  for (const { spec, typeOnly, line } of specifiersOf(file, text)) {
-    const where = `${file}:${line} ${spec}`
-    if (spec === '<式>') {
+  const outside = (spec: string) => {
+    const target = resolve(VIEW_DIR, dirname(file), spec)
+    return relative(VIEW_DIR, target).startsWith('..') || resolve(target) === resolve(VIEW_DIR, '..')
+  }
+  for (const { spec, kind, typeOnly, line } of specifiersOf(file, text)) {
+    const where = `${file}:${line} ${kind === 'module' ? spec : `/// ${kind}=${spec}`}`
+    if (kind === 'path') {
+      // path= は、先頭が . でなくてもファイルからの相対パスとして読まれる
+      if (outside(spec)) hits.push(`${where} (view-3d の外を指す path=)`)
+    } else if (kind === 'lib') {
+      // lib に Node の型は無いが、ブラウザの設定の lib (ES2023・DOM・DOM.Iterable) を広げてしまう
+      if (!isTest) hits.push(`${where} (src に lib= を書かない。ブラウザの設定の lib を広げる)`)
+    } else if (kind === 'types') {
+      // src では全部外れ (ブラウザの型検査の types: [] をすり抜けて @types/node などを読み込む)
+      if (!isTest) hits.push(`${where} (src に types= を書かない。型の束を読み込む)`)
+      else if (spec !== 'node' && !SRC_PACKAGES.has(packageOf(spec)) && !TEST_PACKAGES.has(packageOf(spec))) {
+        hits.push(`${where} (許していない types=)`)
+      }
+    } else if (spec === '<式>') {
       hits.push(`${where} (指定子が文字列でない。確かめられない)`)
     } else if (spec.startsWith('.')) {
-      const target = resolve(VIEW_DIR, dirname(file), spec)
-      const rel = relative(VIEW_DIR, target)
-      if (rel.startsWith('..') || resolve(target) === resolve(VIEW_DIR, '..')) hits.push(`${where} (view-3d の外を指す相対パス)`)
+      if (outside(spec)) hits.push(`${where} (view-3d の外を指す相対パス)`)
     } else if (spec.startsWith('node:')) {
       if (!isTest) hits.push(`${where} (src に Node の物を入れない)`)
     } else {
@@ -882,11 +913,14 @@ function exportedNamesOf(text: string): { names: string[]; star: number } {
   return { names: names.sort(), star }
 }
 
-/** 窓口として書き出す名前 (足す・外す時はここも直す) */
+/**
+ * 窓口として書き出す名前 (足す・外す時はここも直す)。
+ * 盤面の型 (Board・BoardBounds・CellChange・PickRole・PickRoleFn・Pos3) は board が書き出す (#14)
+ */
 const PUBLIC_NAMES = [
-  'ApplyResult', 'AssetState', 'Board', 'BoardBounds', 'CameraInput', 'CameraState', 'CellChange',
+  'ApplyResult', 'AssetState', 'CameraInput', 'CameraState',
   'IsometricView', 'IsometricViewHandle', 'IsometricViewProps', 'MCMETA_BASE', 'PICK_PASS_THROUGH',
-  'PickRole', 'PickRoleFn', 'Pos3', 'VIEWER_FAR', 'VIEWER_FOV_DEG', 'VIEWER_NEAR',
+  'VIEWER_FAR', 'VIEWER_FOV_DEG', 'VIEWER_NEAR',
   'cellKey', 'fitDistance', 'maxZoomOut', 'normalizeState', 'pickRoleFrom',
 ].sort()
 
@@ -984,6 +1018,56 @@ describe('依存の向き (docs/architecture.md §1・§2)', () => {
     expect(hits("IMPORT { Board } from '@redstone-engine/board'")).toHaveLength(1)
     // 注の中の字面は拾わない
     expect(hits("// IMPORT { Engine } from '@redstone-engine/engine-js'\nconst a = 1")).toEqual([])
+  })
+
+  it('見張りは、三重スラッシュの指示 (types=・path=・lib=) と .mts・.cts も拾う (#14)', () => {
+    const hits = (t: string, file = join('src', 'x.ts')) => dependencyHits(file, t.replace(/IMPORT/g, 'import'))
+    const ref = (attr: string) => `/// <reference ${attr} />\nexport const a = 1`
+    // types= は src では全部外れ (ブラウザの型検査の types: [] をすり抜けて @types/node などを読み込む)
+    expect(hits(ref('types="node"'))).toHaveLength(1)
+    expect(hits(ref("types='react'"))).toHaveLength(1)
+    expect(hits(ref('types="node"'), join('test', 'a.test.ts'))).toEqual([])
+    expect(hits(ref('types="vite/client"'), join('test', 'a.test.ts'))).toHaveLength(1)
+    // path= は view-3d の外を指す物が外れ (先頭が . でなくても相対)
+    expect(hits(ref('path="./types.ts"'))).toEqual([])
+    expect(hits(ref('path="renderer/picking.ts"'))).toEqual([])
+    expect(hits(ref('path="../../engine-js/src/node.ts"'))).toHaveLength(1)
+    expect(hits(ref('path="sub/../../../engine-js/src/node.ts"'))).toHaveLength(1)   // 先頭が . でなくても外へ出る
+    expect(hits(ref('path="../../board/src/types.ts"'), join('test', 'a.test.ts'))).toHaveLength(1)
+    // lib= は src では外れ (ブラウザの設定の lib を広げる)。試験は通す
+    expect(hits(ref('lib="esnext"'))).toHaveLength(1)
+    expect(hits(ref('lib="dom"'))).toHaveLength(1)
+    expect(hits(ref('lib="esnext"'), join('test', 'a.test.ts'))).toEqual([])
+    // .mts・.cts も読み、試験のファイルの見分けも同じ
+    for (const f of ['a.ts', 'a.tsx', 'a.mts', 'a.cts', 'a.d.ts', 'a.d.mts']) expect(SOURCE_FILE.test(f), f).toBe(true)
+    for (const f of ['a.js', 'a.mjs', 'a.json', 'a.ts.bak']) expect(SOURCE_FILE.test(f), f).toBe(false)
+    expect(hits("IMPORT { readFileSync } from 'node:fs'", join('src', 'x.mts'))).toHaveLength(1)
+    expect(hits("IMPORT { Engine } from '@redstone-engine/engine-js'", join('src', 'x.cts'))).toHaveLength(1)
+    expect(hits("IMPORT { readFileSync } from 'node:fs'", join('src', 'x.test.mts'))).toEqual([])
+  })
+
+  it('見張るファイルの一覧は .ts・.tsx・.mts・.cts と型の宣言を拾い、.js は拾わない (一時のフォルダで確かめる)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'view-3d-guard-'))
+    try {
+      mkdirSync(join(root, 'src', 'sub'), { recursive: true })
+      const files: Record<string, string> = {
+        'a.ts': 'export const a = 1',
+        'b.mts': "IMPORT { readFileSync } from 'node:fs'\nexport const b = readFileSync",
+        'c.cts': 'export const c = 1',
+        'd.js': "IMPORT { readFileSync } from 'node:fs'",
+        'e.d.mts': 'export declare const e: number',
+        'sub/f.tsx': 'export const f = 1',
+      }
+      for (const [name, text] of Object.entries(files)) writeFileSync(join(root, 'src', name), text.replace(/IMPORT/g, 'import'))
+      const listed = sourcesOf('src', root)
+      expect([...listed].sort()).toEqual(['a.ts', 'b.mts', 'c.cts', 'e.d.mts', join('sub', 'f.tsx')].map(f => join('src', f)).sort())
+      // 一覧に入った .mts の node: の import を、依存の見張りが拾う (view-3d の src は .tsx を置いてよい)
+      const hits = listed.flatMap(f => dependencyHits(f, readFileSync(join(root, f), 'utf-8')))
+      expect(hits).toHaveLength(1)
+      expect(hits[0].startsWith(`${join('src', 'b.mts')}:1 node:fs`), hits.join(' / ')).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('index.ts は export * を使わず、書き出す名前は決めた一覧のとおり', () => {
