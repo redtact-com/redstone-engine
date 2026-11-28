@@ -73,8 +73,17 @@ pub extern "C" fn rse_step(handle: u32, n: u32) -> u32 {
 /// tick の外の入力を 1 件入れ、連鎖を回し切ってから、立ったエンジンの状態コードを返す。
 ///
 /// `kind` は `input_kind`、`section` は区間の印 (0 = B5・1 = C・2 = A・3 = B1。19 §4.1)。
-/// 区間の印は順を変えない (呼んだ順に適用する)。`arg` は、use なら 0、setblock なら下の 16 ビットが StateId で
-/// ビット 16 が strict (ビット 17 以上が立っていれば ARGUMENT)。
+/// 区間の印は順を変えない (呼んだ順に適用する)。`arg` は種類ごとに決まる。
+///
+/// | 種類 | `arg` | 先に断る物 |
+/// |---|---|---|
+/// | use | 0 | 0 でない → ARGUMENT |
+/// | setblock | 下の 16 ビットが StateId・ビット 16 が strict | 表の外・ビット 17 以上 → ARGUMENT |
+/// | place | 下の 16 ビットが StateId・上の 16 ビットは 0 | 表の外・空気・上のビット → ARGUMENT。高さの外・格子の枠の外 → OUT_OF_WORLD |
+/// | break | 0 | 0 でない → ARGUMENT。範囲は確かめない |
+///
+/// 置き換えられない所・支えの無い所に置く、空気を壊す、は何もせずに 0 を返す (実機でも何も起きない)。
+/// 受け付けたか (accepted) は返さない。変わったマスは変化の列で分かる。
 #[unsafe(no_mangle)]
 pub extern "C" fn rse_input(
     handle: u32,
@@ -96,4 +105,14 @@ pub extern "C" fn rse_input(
 #[unsafe(no_mangle)]
 pub extern "C" fn rse_changes(handle: u32, len_out: *mut u32) -> *const CellRec {
     with(|r| r.changes(handle, len_out.addr()))
+}
+
+/// 世界のゲーム時刻を返す。ハンドルが無ければ -1。
+///
+/// L5 で 1 つ進む時計 (V01 §2.3・§4.4) で、B2 の時計ではない。作った直後は 0 で、読み込みと入力では進まず、
+/// `rse_step(h, n)` で n 進む。0 から増えるだけなので、-1 は本物の値と重ならない。
+/// 線形メモリを伸ばさず、作業領域も使わない (結果の番地を受けず、値で返す)。JS には BigInt で来る。
+#[unsafe(no_mangle)]
+pub extern "C" fn rse_game_time(handle: u32) -> i64 {
+    with(|r| r.game_time(handle))
 }

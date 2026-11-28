@@ -53,7 +53,14 @@ rse-java → rse-core → rse-blocks-*  ┐
 
 1. `crates/rse-blocks-<族>/` を作る。依存は rse-core だけ。
 2. 族の `Behavior` が rse-core の状態表に席としてあることを確かめる (無ければ骨格の PR で足す)。
-3. rse-engine に feature と match の腕を足す。
+3. rse-engine に feature と match の腕を足す。`Rules` の口 (近隣更新・形状更新・設置と撤去のフック・予約 tick・使う・信号ほか) に加えて、
+   置く入力の 2 つの口にも腕を足す (#13)。
+   - 置いた時の状態 (`Rules::placement_state`。Block#getStateForPlacement に当たる。V04 §4.13 の手順 4): 要求の状態と周りから、置く状態を決める。
+     周りで決まる値 (ダストの形・ランプの lit ほか) と、置く時にいつも同じ値 (レバーの powered は偽) は要求から読まない。
+     規則がまだ無い要求は `Placement::Unimplemented` を返す (骨格が UNIMPLEMENTED を立て、何も書かない)。黙って要求の状態を置かない。
+   - 支え (`Rules::can_survive`。BlockBehaviour#canSurvive に当たる。同じ手順 5): その状態がその位置に居られるか。支えの条件を持たない素子は真。
+   - どちらも世界を読むだけ (`&Level`) の関数で、族の crate に置く。腕の無い種類は rse-engine の末尾の腕に落ち、
+     置く入力は UNIMPLEMENTED になる (黙って違う状態を置かない)。
 4. 族の fixture を conformance/fixtures に足し、出どころを SOURCES.md に書く。
 5. 典拠のメモの節を、コメントと PR の本文に書く。
 

@@ -7,7 +7,7 @@
 use crate::{RedstoneRules, RedstoneState, lamp, lever, wire};
 use rse_core::state::{block, flag};
 use rse_core::{
-    Behavior, BlockId, Config, Dir, Level, Orientation, Pos, Rules, StateId, UpdateFlags,
+    Behavior, BlockId, Config, Dir, Level, Orientation, Placement, Pos, Rules, StateId, UpdateFlags,
 };
 
 #[derive(Default)]
@@ -98,6 +98,29 @@ impl Rules for Bench {
         match state.behavior() {
             Behavior::Lever => lever::use_block(lv, pos, state),
             Behavior::Wire => wire::use_block(lv, pos, state),
+            _ => false,
+        }
+    }
+
+    // 配る版の振り分け (rse-engine の Engine) と同じ形の match。族の 3 素子と、プロパティを持たない材料
+    // (Inert のうち状態が 1 つの物) だけを置く。空気は置かない。ほかは規則が無い。
+    fn placement_state(lv: &Level<Self>, pos: Pos, requested: StateId) -> Placement {
+        match requested.behavior() {
+            Behavior::Inert if requested.is_air() => Placement::Refused,
+            Behavior::Inert if requested.block().state_count() == 1 => Placement::State(requested),
+            Behavior::Wire => Placement::State(wire::placement_state(lv, pos)),
+            Behavior::Lever => Placement::State(lever::placement_state(requested)),
+            Behavior::Lamp => Placement::State(lamp::placement_state(lv, pos)),
+            _ => Placement::Unimplemented,
+        }
+    }
+
+    // rse-engine と同じ: 材料とランプは支えの条件を持たない。規則の無い種類は置く手順から届かず、届いたら置かない側に倒す。
+    fn can_survive(lv: &Level<Self>, pos: Pos, state: StateId) -> bool {
+        match state.behavior() {
+            Behavior::Inert | Behavior::Lamp => true,
+            Behavior::Wire => wire::can_survive(lv, pos),
+            Behavior::Lever => lever::can_survive(lv, pos, state),
             _ => false,
         }
     }

@@ -8,12 +8,13 @@
 //! - ダスト: 弱い信号 = power を全方向
 
 use crate::level::{Config, Level};
-use crate::rules::Rules;
+use crate::rules::{Placement, Rules};
 use crate::set_block::UpdateFlags;
 use crate::state::{Behavior, BlockId, StateId, block};
 use crate::ticks::TickPriority;
 use crate::update::Orientation;
 use rse_java::{Dir, Pos};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 /// 記録する事象。
@@ -73,6 +74,22 @@ pub enum Ev {
     Mark(&'static str),
 }
 
+/// 置く手順が呼んだ、読むだけの口の記録 ([`Probe::asked`])。
+/// `hooks_before` は、呼ばれた時点で [`Probe::log`] に載っていた事象の数 (フックと更新より前かを見る)。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Asked {
+    Placement {
+        pos: Pos,
+        requested: StateId,
+        hooks_before: usize,
+    },
+    Survive {
+        pos: Pos,
+        state: StateId,
+        hooks_before: usize,
+    },
+}
+
 /// 仕込む動作。
 #[derive(Clone, Copy, Debug)]
 pub enum Act {
@@ -127,6 +144,31 @@ pub struct Probe {
     pub on_use: Scripts,
     /// 形状更新で返す状態 (位置ごとに 1 回)。
     pub shape_result: ShapeResults,
+    /// 置いた時の状態の答え (位置ごと。使っても消えない)。仕込みが無ければ、要求の状態をそのまま置く。
+    pub placement: Answers<Placement>,
+    /// 支えの答え (位置ごと。使っても消えない)。仕込みが無ければ真。
+    pub survive: Answers<bool>,
+    /// 置いた時の状態と支えの口が呼ばれた記録。口は世界を書けない (`&Level`) ので、内側で書き換える。
+    pub asked: RefCell<Vec<Asked>>,
+}
+
+/// 読むだけの口の答えの表。
+pub struct Answers<T>(BTreeMap<Pos3, T>);
+
+impl<T> Default for Answers<T> {
+    fn default() -> Answers<T> {
+        Answers(BTreeMap::new())
+    }
+}
+
+impl<T: Copy> Answers<T> {
+    pub fn insert(&mut self, pos: Pos, answer: T) {
+        self.0.insert(pos.into(), answer);
+    }
+
+    fn get(&self, pos: Pos) -> Option<T> {
+        self.0.get(&pos.into()).copied()
+    }
 }
 
 #[derive(Default)]
@@ -258,6 +300,27 @@ impl Rules for Probe {
     fn use_block(lv: &mut Level<Self>, pos: Pos, _state: StateId) -> bool {
         let acts = lv.rules.on_use.take(pos);
         run(lv, acts)
+    }
+
+    fn placement_state(lv: &Level<Self>, pos: Pos, requested: StateId) -> Placement {
+        lv.rules.asked.borrow_mut().push(Asked::Placement {
+            pos,
+            requested,
+            hooks_before: lv.rules.log.len(),
+        });
+        lv.rules
+            .placement
+            .get(pos)
+            .unwrap_or(Placement::State(requested))
+    }
+
+    fn can_survive(lv: &Level<Self>, pos: Pos, state: StateId) -> bool {
+        lv.rules.asked.borrow_mut().push(Asked::Survive {
+            pos,
+            state,
+            hooks_before: lv.rules.log.len(),
+        });
+        lv.rules.survive.get(pos).unwrap_or(true)
     }
 
     fn signal(_lv: &Level<Self>, _pos: Pos, state: StateId, _dir: Dir) -> i32 {

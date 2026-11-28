@@ -1,4 +1,4 @@
-//! 窓口の 8 関数を、native で JS と同じ呼び方 (作業領域に書いて番地を渡す) で確かめる。
+//! 窓口の 10 関数を、native で JS と同じ呼び方 (作業領域に書いて番地を渡す) で確かめる。
 //!
 //! テストはスレッドごとに別の世界の表を持つ (registry.rs の thread_local)。
 
@@ -118,10 +118,47 @@ fn lamp_of(changes: &[CellRec]) -> Option<u32> {
         .map(|c| c.state)
 }
 
+// 版の字面はここに書かない (上げた時に直す所を ABI_VERSION の 1 か所にする)。engine-js は読み込んだ wasm の
+// rse_abi_version を自分の ABI_VERSION と比べるので、Rust と TS の版が違えば engine-js のテストが落ちる。
 #[test]
-fn abi_version_is_one() {
-    assert_eq!(rse_abi_version(), 1);
-    assert_eq!(ABI_VERSION, 1);
+fn abi_version_is_the_constant() {
+    assert_eq!(rse_abi_version(), ABI_VERSION);
+}
+
+// 入力の種類の番号は境界を越えるので固定する (engine-js の INPUT_KIND と同じ値)。
+#[test]
+fn input_kinds_are_fixed() {
+    use input_kind::*;
+    assert_eq!([USE, SET_BLOCK, PLACE, BREAK], [0, 1, 2, 3]);
+}
+
+// 書き出しの 10 関数の形 (引数と返り値の型) を固定する。型が違えば組めない。
+// wasm の書き出しの全部 (関数の顔ぶれ・memory・global) は、engine-js のテストが組んだ wasm で見る。
+#[test]
+fn exports_keep_their_shapes() {
+    macro_rules! shapes {
+        ($($name:ident: $ty:ty),* $(,)?) => {
+            [$((stringify!($name), $name as $ty as usize)),*]
+        };
+    }
+    let all = shapes![
+        rse_abi_version: extern "C" fn() -> u32,
+        rse_scratch: extern "C" fn(u32) -> *mut u8,
+        rse_world_new: extern "C" fn() -> u32,
+        rse_world_free: extern "C" fn(u32) -> u32,
+        rse_resolve: extern "C" fn(*const u8, u32, *mut u32) -> u32,
+        rse_load: extern "C" fn(u32, *const CellRec, u32, u32) -> u32,
+        rse_step: extern "C" fn(u32, u32) -> u32,
+        rse_input: extern "C" fn(u32, u32, u32, i32, i32, i32, u32) -> u32,
+        rse_changes: extern "C" fn(u32, *mut u32) -> *const CellRec,
+        rse_game_time: extern "C" fn(u32) -> i64,
+    ];
+    assert_eq!(all.len(), 10);
+    // 名前は全部 rse_ で始まり、別々の関数を指す。
+    for (i, (name, at)) in all.iter().enumerate() {
+        assert!(name.starts_with("rse_"), "{name}");
+        assert!(all[..i].iter().all(|(_, other)| other != at), "{name}");
+    }
 }
 
 // 窓口の状態コードは上の 16 ビットにあり、エンジンの状態コードと重ならない。値は境界を越えるので固定する。
@@ -155,11 +192,17 @@ fn worlds_are_created_and_freed_by_handle() {
     for code in [
         rse_step(a, 1),
         use_lever(a),
+        rse_input(a, input_kind::PLACE, A, 0, 1, 0, id("stone")),
+        rse_input(a, input_kind::BREAK, A, 0, 1, 0, 0),
         load(a, &[], load_mode::SETTLED),
     ] {
         assert_eq!(code, status::HANDLE);
     }
     assert_eq!(changes(a), None);
+    // 時計はハンドルが無ければ -1 (0 と、捨てた世界と、作っていない番号)。
+    for stale in [a, 0, 0xFFFF] {
+        assert_eq!(rse_game_time(stale), -1);
+    }
     assert_eq!(rse_step(c, 1), 0);
     assert_eq!(rse_world_free(b), 0);
     assert_eq!(rse_world_free(c), 0);
@@ -503,5 +546,356 @@ fn input_arguments_are_checked() {
     assert_eq!(changes(h).unwrap(), []);
     // 何もしない所を使っても、状態コードは立たない。
     assert_eq!(rse_input(h, input_kind::USE, A, 0, 0, 0, 0), 0);
+    assert_eq!(rse_world_free(h), 0);
+}
+
+// ---- 置く・壊す (input_kind の 2 と 3) と時計 (rse_game_time)。版 2 で足した ----
+
+const WIRE_CROSS: &str = "redstone_wire[east=side,north=side,power=0,south=side,west=side]";
+const WIRE_LINE_X: &str = "redstone_wire[east=side,north=none,power=0,south=none,west=side]";
+
+fn place(handle: u32, x: i32, y: i32, z: i32, name: &str) -> u32 {
+    rse_input(handle, input_kind::PLACE, A, x, y, z, id(name))
+}
+
+fn break_at(handle: u32, x: i32, y: i32, z: i32) -> u32 {
+    rse_input(handle, input_kind::BREAK, A, x, y, z, 0)
+}
+
+/// 石の床 (y=0) の x 0〜4・z 0〜2。
+fn floor() -> Vec<CellRec> {
+    (0..=4)
+        .flat_map(|x| (0..=2).map(move |z| cell(x, 0, z, "stone")))
+        .collect()
+}
+
+/// 変化の列を、座標の順に並べた (座標, 名前) にする。
+fn named(changes: &[CellRec]) -> Vec<((i32, i32, i32), String)> {
+    let mut out: Vec<_> = changes
+        .iter()
+        .map(|c| ((c.x, c.y, c.z), StateId(c.state as u16).to_string()))
+        .collect();
+    out.sort();
+    out
+}
+
+// 置く・壊すは rse-core の入力そのもの。ダストの形は置いた時の規則と形状更新が決める (V06 §4.3・§4.4)。
+// 置けない所 (置き換えられない・支えが無い) と空気を壊す、は何もせずに 0 を返す。
+#[test]
+fn place_and_break_go_through_the_engine() {
+    let h = rse_world_new();
+    assert_eq!(load(h, &floor(), 0), 0);
+    changes(h);
+    // 孤立したダストは十字で置かれる。要求のプロパティ (既定の状態) は読まない。
+    assert_eq!(place(h, 1, 1, 1, "redstone_wire"), 0);
+    assert_eq!(
+        named(&changes(h).unwrap()),
+        [((1, 1, 1), WIRE_CROSS.to_string())]
+    );
+    // 隣に置くと、どちらも東西の直線になる。
+    assert_eq!(place(h, 2, 1, 1, WIRE_CROSS), 0);
+    assert_eq!(
+        named(&changes(h).unwrap()),
+        [
+            ((1, 1, 1), WIRE_LINE_X.to_string()),
+            ((2, 1, 1), WIRE_LINE_X.to_string())
+        ]
+    );
+    // 壊すと空気になり、残ったダストは十字に戻る。
+    assert_eq!(break_at(h, 2, 1, 1), 0);
+    assert_eq!(
+        named(&changes(h).unwrap()),
+        [
+            ((1, 1, 1), WIRE_CROSS.to_string()),
+            ((2, 1, 1), "air".to_string())
+        ]
+    );
+    // 置き換えられない所 (石・ダスト)・支えの無い所 (下が空気)・空気を壊す、は何もしない。
+    assert_eq!(place(h, 0, 0, 0, "redstone_lamp"), 0);
+    assert_eq!(place(h, 1, 1, 1, "stone"), 0);
+    assert_eq!(place(h, 1, 3, 1, "redstone_wire"), 0);
+    assert_eq!(place(h, 1, 3, 1, "lever[face=floor,facing=east]"), 0);
+    assert_eq!(break_at(h, 3, 1, 1), 0);
+    assert_eq!(changes(h).unwrap(), []);
+    // 支えのある所なら、石もランプもレバーも置ける。レバーは、入った状態を要求しても切れて置かれる (V09 §4.1)。
+    assert_eq!(
+        place(h, 3, 1, 1, "lever[face=floor,facing=east,powered=true]"),
+        0
+    );
+    assert_eq!(place(h, 4, 1, 1, "redstone_lamp"), 0);
+    assert_eq!(place(h, 1, 5, 1, "stone"), 0);
+    assert_eq!(
+        named(&changes(h).unwrap()),
+        [
+            ((1, 5, 1), "stone".to_string()),
+            (
+                (3, 1, 1),
+                "lever[face=floor,facing=east,powered=false]".to_string()
+            ),
+            ((4, 1, 1), "redstone_lamp[lit=false]".to_string()),
+        ]
+    );
+    // 入力では時計が進まない。
+    assert_eq!(rse_game_time(h), 0);
+    assert_eq!(rse_world_free(h), 0);
+}
+
+// 置く・壊すの arg は、読まない所が 0 でなければ断り、何もしない。
+#[test]
+fn place_and_break_arguments_are_checked() {
+    let h = rse_world_new();
+    assert_eq!(load(h, &floor(), 0), 0);
+    changes(h);
+    let stone = id("stone");
+    let place_arg = |arg: u32| rse_input(h, input_kind::PLACE, A, 1, 1, 1, arg);
+    // 表の外の StateId・空気・上の 16 ビット。
+    for arg in [
+        STATE_COUNT as u32,
+        0xFFFF,
+        0,
+        stone | 1 << 16,
+        stone | 1 << 31,
+        u32::MAX,
+    ] {
+        assert_eq!(place_arg(arg), status::ARGUMENT, "{arg:#x}");
+    }
+    // 壊すの arg は 0 だけ (石の床を壊そうとしても、断れば石は残る)。
+    for arg in [1, stone, 1 << 16] {
+        assert_eq!(
+            rse_input(h, input_kind::BREAK, A, 0, 0, 0, arg),
+            status::ARGUMENT,
+            "{arg:#x}"
+        );
+    }
+    // 区間の番号と種類の番号も断る (種類は 0〜3 だけ)。
+    assert_eq!(
+        rse_input(h, input_kind::PLACE, 4, 1, 1, 1, stone),
+        status::ARGUMENT
+    );
+    assert_eq!(rse_input(h, 4, A, 1, 1, 1, stone), status::ARGUMENT);
+    assert_eq!(rse_input(h, 4, A, 0, 0, 0, 0), status::ARGUMENT);
+    assert_eq!(changes(h).unwrap(), []);
+    // どの区間でも通る (区間の印は順を変えない)。
+    for section in 0..4 {
+        assert_eq!(
+            rse_input(h, input_kind::PLACE, section, section as i32, 1, 1, stone),
+            0
+        );
+    }
+    assert_eq!(changes(h).unwrap().len(), 4);
+    assert_eq!(rse_world_free(h), 0);
+}
+
+// 置く前に rse_load と同じ確かめ (can_set_all_raw) で、高さの外と格子の枠の外を断る (PR #16 の承認の 2)。
+// rse-core を直に呼ぶと、格子の枠の外は書き込みまで進んで SAFETY になる。高さの外は、規則のある種類なら
+// 置いた時の状態と支えの口を呼んでから書き込みが断るので 0 になる (規則の無い種類なら、置いた時の状態の口の答えで
+// UNIMPLEMENTED を立てて戻る。今の状態表には無い)。
+// 窓口は OUT_OF_WORLD を返し、SAFETY を立てず、世界も格子も変えない。壊すは範囲を確かめず、同じ所でも 0。
+#[test]
+fn place_outside_the_world_is_refused_before_the_engine() {
+    let h = rse_world_new();
+    // 格子は (0, 0, 0) のセクションだけ。
+    assert_eq!(load(h, &[cell(0, 0, 0, "stone")], 0), 0);
+    changes(h);
+    let mut direct = new_world(Config::default());
+    assert!(direct.set_state_raw(Pos::new(0, 0, 0), StateId(id("stone") as u16)));
+    let outside = [
+        (0, 320, 0),
+        (0, -65, 0),
+        (0, i32::MAX, 0),
+        (16 * 256, 1, 0),
+        (0, 1, -16 * 256),
+        (i32::MIN, 1, i32::MIN),
+    ];
+    for (x, y, z) in outside {
+        for name in ["stone", "redstone_lamp"] {
+            assert_eq!(place(h, x, y, z, name), status::OUT_OF_WORLD, "{x} {y} {z}");
+        }
+        assert_eq!(break_at(h, x, y, z), 0, "{x} {y} {z}");
+        // 直に呼んだ時: 高さの外は 0、格子の枠の外は SAFETY。
+        let state = StateId(id("stone") as u16);
+        let pos = Pos::new(x, y, z);
+        let raw = direct.input(InputSection::A, Input::Place { pos, state });
+        assert!(!raw.accepted);
+        let in_height = (-64..320).contains(&y);
+        let expect = if in_height {
+            Status::SAFETY
+        } else {
+            Status::OK
+        };
+        assert_eq!(raw.status, expect, "{x} {y} {z}");
+    }
+    assert_eq!(changes(h).unwrap(), []);
+    // 断った置く入力は、状態コードを後に残さない。
+    assert_eq!(rse_step(h, 1), 0);
+    assert_eq!(changes(h).unwrap(), []);
+    // 格子も広げていない: 枠の端 (255 セクション先) には置け、そこと合わせて枠を超える所は断る。
+    assert_eq!(place(h, 16 * 255, 0, 0, "stone"), 0);
+    assert_eq!(place(h, -1, 0, 0, "stone"), status::OUT_OF_WORLD);
+    assert_eq!(changes(h).unwrap(), [cell(16 * 255, 0, 0, "stone")]);
+    assert_eq!(rse_world_free(h), 0);
+}
+
+// 時計は L5 のゲーム時刻 (V01 §2.3・§4.4)。作った直後は 0、読み込みと入力では進まず、step(n) で n 進む。
+// 世界ごとに別。ハンドルが無ければ -1。作業領域を書かず、広げない。
+//
+// B2 の時計 (Level::clock。V01 §2.2 の表) は、このエンジンでは L5 といつも同じ数だけ進む。これはメモの性質ではなく、
+// このエンジンの B2 が、ゲームルール advance_time・時計の paused・rate (V01 §4.4) と、時計を書き換える入力
+// (/time set・L3 の睡眠) を持たないからである。凍結中は B2 も L5 も止まるので、凍結では分かれない。
+// だから今は、取り違えても窓口からは見分けられない。上の物が入ったら、ここで 2 つを比べる。
+#[test]
+fn game_time_counts_ticks_only() {
+    let (a, b) = (rse_world_new(), rse_world_new());
+    assert_eq!((rse_game_time(a), rse_game_time(b)), (0, 0));
+    assert_eq!(load(a, &circuit(), 0), 0);
+    assert_eq!(rse_game_time(a), 0);
+    assert_eq!(use_lever(a), 0);
+    assert_eq!(place(a, 2, 1, 1, "redstone_wire"), 0);
+    assert_eq!(break_at(a, 2, 1, 1), 0);
+    assert_eq!(rse_game_time(a), 0);
+    assert_eq!(rse_step(a, 3), 0);
+    assert_eq!(rse_game_time(a), 3);
+    assert_eq!(rse_step(a, 0), 0);
+    assert_eq!(rse_game_time(a), 3);
+    assert_eq!(rse_step(a, 5), 0);
+    assert_eq!(rse_game_time(a), 8);
+    // 世界ごとに別。
+    assert_eq!(rse_game_time(b), 0);
+    assert_eq!(rse_step(b, 1), 0);
+    assert_eq!((rse_game_time(a), rse_game_time(b)), (8, 1));
+    // 作業領域を書かず、広げない (結果は値で返す)。
+    let base = rse_scratch(16);
+    let size = registry::with(|r| r.scratch_len());
+    poke(base, &[0xAB; 16]);
+    assert_eq!(rse_game_time(a), 8);
+    assert_eq!(rse_game_time(0), -1);
+    assert_eq!(registry::with(|r| r.scratch_len()), size);
+    assert_eq!(
+        registry::with(|r| r.scratch_mut().bytes(base.addr(), 16).map(<[u8]>::to_vec)),
+        Some(vec![0xAB; 16])
+    );
+    // 捨てると -1。残った世界は進み続ける。
+    assert_eq!(rse_world_free(a), 0);
+    assert_eq!(rse_game_time(a), -1);
+    assert_eq!(rse_step(b, 2), 0);
+    assert_eq!(rse_game_time(b), 3);
+    assert_eq!(rse_world_free(b), 0);
+    assert_eq!(rse_game_time(b), -1);
+}
+
+/// 試験の中の乱数 (線形合同。依存を足さない)。上の 32 ビットを使う。
+struct Lcg(u64);
+
+impl Lcg {
+    fn below(&mut self, n: u32) -> u32 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((self.0 >> 32) % n as u64) as u32
+    }
+}
+
+// 窓口を通した置く・壊す・使うを混ぜた列が、rse-engine を直に呼んだ結果と、入力ごとの状態コード・
+// tick ごとの変化の列・ゲーム時刻まで同じになる。種と回数は固定。
+#[test]
+fn abi_matches_the_engine_with_place_and_break() {
+    let palette = [
+        "stone",
+        "redstone_wire",
+        WIRE_CROSS,
+        "redstone_lamp",
+        "redstone_lamp[lit=true]",
+        "lever[face=floor,facing=north]",
+        "lever[face=floor,facing=east]",
+        "lever[face=wall,facing=south]",
+        "lever[face=ceiling,facing=west]",
+        // 入った状態の要求 (切れて置かれる。V09 §4.1)。
+        "lever[face=floor,facing=north,powered=true]",
+        "lever[face=wall,facing=east,powered=true]",
+    ]
+    .map(id);
+    // 入った状態の要求と、置かれる状態 (切れたレバー)。
+    let powered_requests = [
+        (palette[9], id("lever[face=floor,facing=north]")),
+        (palette[10], id("lever[face=wall,facing=east]")),
+    ];
+    let sections = [
+        InputSection::B5,
+        InputSection::C,
+        InputSection::A,
+        InputSection::B1,
+    ];
+    let drain = |w: &mut rse_engine::World| -> Vec<CellRec> {
+        w.drain_changes()
+            .iter()
+            .map(|c| CellRec {
+                x: c.pos.x,
+                y: c.pos.y,
+                z: c.pos.z,
+                state: c.state.0 as u32,
+            })
+            .collect()
+    };
+    let h = rse_world_new();
+    let mut direct = new_world(Config::default());
+    let board: Vec<CellRec> = (0..6)
+        .flat_map(|x| (0..6).map(move |z| cell(x, 0, z, "stone")))
+        .collect();
+    assert_eq!(load(h, &board, 0), 0);
+    for c in &board {
+        assert!(direct.set_state_raw(Pos::new(c.x, c.y, c.z), StateId(c.state as u16)));
+    }
+    assert_eq!(changes(h).unwrap(), drain(&mut direct));
+    let mut rng = Lcg(0x5EED_0013);
+    let (mut placed, mut placed_powered, mut refused, mut unimplemented) = (0, 0, 0, 0);
+    for t in 1..=400 {
+        assert_eq!(rse_step(h, 1), direct.tick().0, "tick {t}");
+        for _ in 0..rng.below(4) {
+            let (x, y, z) = (
+                rng.below(6) as i32,
+                rng.below(3) as i32,
+                rng.below(6) as i32,
+            );
+            let pos = Pos::new(x, y, z);
+            let section = rng.below(4);
+            let (kind, arg, input) = match rng.below(4) {
+                0 | 1 => {
+                    let state = palette[rng.below(palette.len() as u32) as usize];
+                    let input = Input::Place {
+                        pos,
+                        state: StateId(state as u16),
+                    };
+                    (input_kind::PLACE, state, input)
+                }
+                2 => (input_kind::BREAK, 0, Input::Break { pos }),
+                _ => (input_kind::USE, 0, Input::Use { pos }),
+            };
+            let got = rse_input(h, kind, section, x, y, z, arg);
+            let want = direct.input(sections[section as usize], input);
+            assert_eq!(got, want.status.0, "tick {t} {input:?}");
+            if kind == input_kind::PLACE {
+                placed += usize::from(want.accepted);
+                refused += usize::from(!want.accepted);
+                if let Some(&(_, off)) = powered_requests.iter().find(|(on, _)| *on == arg)
+                    && want.accepted
+                {
+                    placed_powered += 1;
+                    assert_eq!(direct.get_state(pos).0 as u32, off, "tick {t} {input:?}");
+                }
+            }
+            unimplemented += usize::from(want.status == Status::UNIMPLEMENTED);
+        }
+        assert_eq!(changes(h).unwrap(), drain(&mut direct), "tick {t}");
+        assert_eq!(rse_game_time(h), direct.game_time(), "tick {t}");
+    }
+    assert_eq!(rse_game_time(h), 400);
+    // 列が素通りしていない: 置けた入力も、置けずに 0 を返した入力も、入った状態の要求を切れて置いた入力も通った。
+    // 既定の組み立てでは、状態表の種類 (空気・石・3 素子) は全部に置いた時の規則があるので、UNIMPLEMENTED は立たない。
+    // 規則の無い種類で UNIMPLEMENTED が立つことは、族を外した組み立ての試験 (rse-engine の lib.rs) が見る。
+    assert!(placed > 50, "{placed}");
+    assert!(refused > 50, "{refused}");
+    assert!(placed_powered > 5, "{placed_powered}");
+    assert_eq!(unimplemented, 0);
     assert_eq!(rse_world_free(h), 0);
 }

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Engine } from '../src/engine'
 import { loadEngineFromFiles } from '../src/node'
-import { formatReport, parseFixture, passed, runFixture, runFixtureJson } from './fixture'
+import { type Build, formatReport, parseFixture, passed, runFixture, runFixtureJson } from './fixture'
 
 /**
  * conformance/fixtures の全部を wasm で回す (#9)。native の実行器 (rse-cli) と同じく、毎 tick・領域の全マスで比べる。
@@ -22,6 +22,15 @@ const FIXTURES = readdirSync(fixtureDir)
 const fixture = (name: string) => FIXTURES.find(f => f.name === name)?.json ?? ''
 const LEVER_WIRE_LAMP = fixture('lever-wire-lamp')
 const LAMP_OFF_DELAY = fixture('lamp-off-delay')
+
+/** 0〜ticks */
+const ticksOf = (ticks: number) => Array.from({ length: ticks + 1 }, (_, t) => t)
+
+/** 0〜n−1 の並べ替えの全部 */
+function permutations(n: number): number[][] {
+  if (n === 0) return [[]]
+  return permutations(n - 1).flatMap(rest => Array.from({ length: n }, (_, at) => rest.toSpliced(at, 0, n - 1)))
+}
 
 /** native の実行器に JSON を渡して回す。ファイルは OS の一時フォルダに書き、終わったら消す */
 const work = mkdtempSync(join(tmpdir(), 'rse-fixture-'))
@@ -56,6 +65,9 @@ describe('fixture を wasm で回す', () => {
       // step を呼ぶのは t ≥ 1 だけ。比べるのは tick 0〜ticks の毎回、領域の全マス。
       expect(report.stepped).toBe(report.ticks)
       expect(report.compared % (report.ticks + 1)).toBe(0)
+      // 世界の時計 (L5 のゲーム時刻) は fixture の t と同じ。初めの盤面 (tick −1 の状態) を置いた後は 0 で、
+      // t = 0 では進めず、t ≥ 1 で 1 つずつ進む。入力 (t2 などの use) では進まない。
+      expect(report.times).toEqual(ticksOf(report.ticks))
     })
   }
 
@@ -195,5 +207,56 @@ describe('wasm の実行器の数え方 (native と同じ)', () => {
     )
     expect(passed(runFixtureJson(base('[]', '[]'), engine))).toBe(true)
     expect(() => runFixtureJson('{', engine)).toThrow('JSON が読めない')
+  })
+})
+
+// 初めの盤面を、置く入力 (RustWorld.place) で組む。native の rse-cli の試験と同じ組み方を、本物の wasm で回す。
+// fixture 2 本とも、床 (y=0) の 10 マスを更新なしで置いてから、上 (y=1) の 5 個 (レバー・ダスト 3 本・ランプ) を
+// 120 通りの順で置く。ダストとランプの要求は既定の状態で、形と lit は置いた時の規則と形状更新が決める。
+// レバーは face と facing を運ぶので、fixture の状態のまま渡す。
+// - どの順でも、置く入力は 0 を返し、組んだ後の時計は 0 のまま。
+// - そこから fixture の入力で回すと、expect と毎 tick 全マスが一致する。tick 0 の比べは初めの盤面そのもの
+//   (2 本とも、tick 0 の入力と期待は無い)。時計は毎 tick fixture の t と同じ。
+// fixture のファイルは変えない。入力の action に置くを足さない (実機のハーネスに無い。断る試験はそのまま)。
+describe('初めの盤面を置く入力で組む', () => {
+  for (const name of ['lever-wire-lamp', 'lamp-off-delay']) {
+    it(`${name}: 上の 5 個を 120 通りの順で置いて組み、そこから毎 tick 一致する`, () => {
+      const f = parseFixture(fixture(name), engine)
+      expect(f.inputs.every(i => i.tick > 0) && f.expect.every(e => e.tick > 0)).toBe(true)
+      const floor = f.blocks.filter(b => b.pos.y === 0)
+      const upper = f.blocks.filter(b => b.pos.y !== 0)
+      expect([floor.length, upper.length]).toEqual([10, 5])
+      const orders = permutations(upper.length)
+      expect(orders).toHaveLength(120)
+      expect(new Set(orders.map(o => o.join())).size).toBe(120)
+      for (const order of orders) {
+        const build: Build = world => {
+          expect(world.load(floor.map(b => ({ ...b.pos, state: b.state })))).toBe(0)
+          for (const i of order) {
+            const { pos, state } = upper[i]
+            const block = engine.states.block(state)
+            // 周りで決まる値を捨てた要求にする。レバーは face と facing を運ぶので、そのまま。
+            const requested = block.behavior === 'Lever' ? state : block.defaultState
+            expect(world.place(pos.x, pos.y, pos.z, requested), `${name} ${order}`).toBe(0)
+          }
+          expect(world.gameTime()).toBe(0)
+        }
+        const report = runFixture(f, engine, build)
+        expect(passed(report), `${name} ${order}\n${formatReport(report)}`).toBe(true)
+        expect(report.times).toEqual(ticksOf(f.ticks))
+      }
+    })
+  }
+
+  // 素通りしていない: ダストを置かずに組むと、tick 0 (初めの盤面) から合わない。
+  it('置き損ねた盤面は tick 0 から合わない', () => {
+    const f = parseFixture(LEVER_WIRE_LAMP, engine)
+    const report = runFixture(f, engine, world => {
+      world.load(f.blocks.filter(b => b.pos.y === 0).map(b => ({ ...b.pos, state: b.state })))
+      for (const { pos, state } of f.blocks.filter(b => b.pos.y !== 0 && engine.states.block(b.state).behavior !== 'Wire')) {
+        world.place(pos.x, pos.y, pos.z, state)
+      }
+    })
+    expect(report.mismatches.filter(m => m.tick === 0).map(m => m.pos.x)).toEqual([1, 2, 3])
   })
 })

@@ -5,10 +5,12 @@ import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
 import {
   ABI_STATUS,
+  ABI_VERSION,
   ENGINE_STATUS,
   EXPORTED_FUNCTIONS,
   EngineError,
   EngineStoppedError,
+  INPUT_KIND,
   type RseExports,
   STATUS,
   STATUS_TEXT,
@@ -19,7 +21,10 @@ import { GENERATED_DIR, loadEngineFromFiles } from '../src/node'
 import { StateTable } from '../src/states'
 import { type Cell, RustWorld, releaseLeaked } from '../src/world'
 
-/** Engine・RustWorld・ChangeWindow の単体テスト (作る・捨てる・置く・進める・入力・変化の窓・状態表の往復・誤りの断り)。 */
+/**
+ * Engine・RustWorld・ChangeWindow の単体テスト (作る・捨てる・読み込む・進める・入力 (使う・置く・壊す)・時計・
+ * 変化の窓・状態表の往復・誤りの断り)。
+ */
 
 const WASM = readFileSync(new URL('rse_wasm.wasm', GENERATED_DIR))
 const STATES = readFileSync(new URL('states.json', GENERATED_DIR), 'utf-8')
@@ -73,7 +78,7 @@ function manyStones(e: Engine, n: number): Int32Array {
 }
 
 describe('wasm の読み込み', () => {
-  // 19 §2.5 の 7 関数 + 作業領域 + 版の 9 関数と memory。global の 2 つ (__data_end・__heap_base) は
+  // 19 §2.5 の 7 関数 + 作業領域 + 版 + 時計の 10 関数と memory。global の 2 つ (__data_end・__heap_base) は
   // Rust の wasm32 のリンカが cdylib に出す物で、JS は使わない。顔ぶれが変わったら気づけるよう、全部を固定する。
   it('import は 0 個で、書き出しの全部が決まった顔ぶれ', () => {
     const module = new WebAssembly.Module(WASM)
@@ -88,12 +93,20 @@ describe('wasm の読み込み', () => {
       'global __heap_base',
     ].sort()
     expect(all).toEqual(expected)
+    expect(EXPORTED_FUNCTIONS).toHaveLength(10)
+  })
+
+  // engine-js の版と、組んだ wasm の版が同じ (字面は ABI_VERSION の 1 か所にだけ書く)。
+  it('wasm の版は engine-js の ABI_VERSION と同じ', () => {
+    const raw = new WebAssembly.Instance(new WebAssembly.Module(WASM), {}).exports as unknown as RseExports
+    expect(raw.rse_abi_version()).toBe(ABI_VERSION)
+    expect(engine.abiVersion).toBe(ABI_VERSION)
   })
 
   it('バイト列・Module・Response のどれからでも読める', async () => {
     for (const source of [WASM, new WebAssembly.Module(WASM), new Response(WASM, { headers: { 'content-type': 'application/wasm' } })]) {
       const e = await Engine.load(source, STATES)
-      expect(e.abiVersion).toBe(1)
+      expect(e.abiVersion).toBe(ABI_VERSION)
       expect(e.resolve('stone')).toBe(1)
     }
     // MIME 型が違う配信 (instantiateStreaming が断る) でも、バイト列で読み直す。
@@ -117,9 +130,16 @@ describe('wasm の読み込み', () => {
   // 版の違う wasm は関数の顔ぶれも違いうるので、関数の有無より先に版を見る。
   it('版を先に確かめる', () => {
     const memory = new WebAssembly.Memory({ initial: 1 })
-    expect(() => Engine.fromExports({ rse_abi_version: () => 2, memory }, STATES)).toThrow('窓口の版が合わない: wasm は 2')
+    const other = ABI_VERSION + 1
+    expect(() => Engine.fromExports({ rse_abi_version: () => other, memory }, STATES)).toThrow(
+      `窓口の版が合わない: wasm は ${other}・engine-js は ${ABI_VERSION}`,
+    )
     expect(() => Engine.fromExports({ memory }, STATES)).toThrow('rse_abi_version が無い')
-    expect(() => Engine.fromExports({ rse_abi_version: () => 1, memory }, STATES)).toThrow('wasm に関数が無い')
+    expect(() => Engine.fromExports({ rse_abi_version: () => ABI_VERSION, memory }, STATES)).toThrow('wasm に関数が無い')
+    // 版が合っても、時計 (版 2 で足した) が無い wasm は断る。
+    const real = new WebAssembly.Instance(new WebAssembly.Module(WASM), {}).exports
+    const withoutClock = Object.fromEntries(Object.entries(real).filter(([name]) => name !== 'rse_game_time'))
+    expect(() => Engine.fromExports(withoutClock, STATES)).toThrow('wasm に関数が無い: rse_game_time')
   })
 
   it('状態表の JSON が wasm と合わなければ断る', async () => {
@@ -296,8 +316,30 @@ describe('RustWorld', () => {
     expect(c.handle & 0xffff).toBe(a.handle & 0xffff)
     expect(c.handle).not.toBe(a.handle)
     const before = engine.epoch
-    for (const use of [() => a.step(), () => a.use(0, 1, 0), () => a.changes(), () => a.load([]), () => a.input('use', 'A', 0, 0, 0)]) {
+    const stone = engine.resolve('stone')
+    for (const use of [
+      () => a.step(),
+      () => a.use(0, 1, 0),
+      () => a.changes(),
+      () => a.load([]),
+      () => a.input('use', 'A', 0, 0, 0),
+      () => a.place(0, 1, 0, stone),
+      () => a.breakBlock(0, 1, 0),
+      () => a.gameTime(),
+      // 捨てた世界は、引数の誤りより先に断る (load ほかと同じ)。
+      () => a.place(0, 1, 0, -1),
+    ]) {
       expect(thrownStatus(use)).toBe(STATUS.HANDLE)
+    }
+    // 例外の文の頭は、呼んだ操作の名前。
+    for (const [name, use] of [
+      ['use', () => a.use(0, 1, 0)],
+      ['place', () => a.place(0, 1, 0, stone)],
+      ['breakBlock', () => a.breakBlock(0, 1, 0)],
+      ['gameTime', () => a.gameTime()],
+      ['input (break)', () => a.input('break', 'A', 0, 1, 0)],
+    ] as const) {
+      expect(use, name).toThrow(new RegExp(`^${name.replace(/[()]/g, '\\$&')} \\(捨てた世界\\): HANDLE$`))
     }
     expect(engine.epoch).toBe(before)
     b.dispose()
@@ -402,6 +444,173 @@ describe('RustWorld', () => {
     expect(() => {
       ;(engine as unknown as { epoch: number }).epoch = 0
     }).toThrow(TypeError)
+  })
+})
+
+describe('置く・壊す・時計 (窓口の版 2)', () => {
+  const CROSS = 'redstone_wire[east=side,north=side,power=0,south=side,west=side]'
+  const LINE_X = 'redstone_wire[east=side,north=none,power=0,south=none,west=side]'
+
+  /** 石の床 (y=0) の x 0〜4・z 0〜2 */
+  function floor(e: Engine = engine): Cell[] {
+    const stone = e.resolve('stone')
+    const out: Cell[] = []
+    for (let x = 0; x <= 4; x++) for (let z = 0; z <= 2; z++) out.push({ x, y: 0, z, state: stone })
+    return out
+  }
+
+  /** 変化を座標の順に並べて読む */
+  const sorted = (world: RustWorld) => drain(world).sort((p, q) => p.x - q.x || p.y - q.y || p.z - q.z)
+
+  // 入力の種類の番号は Rust の input_kind と同じ。外の番号は wasm が ARGUMENT で断る (Rust の種類はこの 4 つだけ)。
+  it('入力の種類の番号は Rust と同じ', () => {
+    expect(INPUT_KIND).toEqual({ use: 0, setBlock: 1, place: 2, break: 3 })
+    const raw = new WebAssembly.Instance(new WebAssembly.Module(WASM), {}).exports as unknown as RseExports
+    const h = raw.rse_world_new()
+    expect(raw.rse_input(h, 4, 2, 0, 0, 0, 0) >>> 0).toBe(STATUS.ARGUMENT)
+    for (const kind of [INPUT_KIND.use, INPUT_KIND.break]) expect(raw.rse_input(h, kind, 2, 0, 0, 0, 0)).toBe(0)
+  })
+
+  // ダストの形は置いた時の規則と形状更新が決める (V06 §4.3・§4.4)。要求のプロパティは読まない。
+  it('置くと周りから形が決まり、壊すと戻る', () => {
+    const world = engine.createWorld()
+    world.load(floor())
+    drain(world)
+    expect(world.place(1, 1, 1, engine.resolve('redstone_wire'))).toBe(0)
+    expect(drain(world)).toEqual([{ x: 1, y: 1, z: 1, block: CROSS }])
+    expect(world.place(2, 1, 1, engine.resolve(CROSS))).toBe(0)
+    expect(sorted(world)).toEqual([
+      { x: 1, y: 1, z: 1, block: LINE_X },
+      { x: 2, y: 1, z: 1, block: LINE_X },
+    ])
+    expect(world.breakBlock(2, 1, 1)).toBe(0)
+    expect(sorted(world)).toEqual([
+      { x: 1, y: 1, z: 1, block: CROSS },
+      { x: 2, y: 1, z: 1, block: 'air' },
+    ])
+    // レバーは face と facing を要求のまま使う。区間を渡せる (input と同じ)。
+    expect(world.place(3, 1, 1, engine.resolve('lever[face=floor,facing=east]'), 'C')).toBe(0)
+    expect(world.input('place', 'A', 4, 1, 1, engine.resolve('redstone_lamp'))).toBe(0)
+    expect(sorted(world)).toEqual([
+      { x: 3, y: 1, z: 1, block: 'lever[face=floor,facing=east,powered=false]' },
+      { x: 4, y: 1, z: 1, block: 'redstone_lamp[lit=false]' },
+    ])
+    expect(world.input('break', 'B5', 3, 1, 1)).toBe(0)
+    expect(drain(world)).toEqual([{ x: 3, y: 1, z: 1, block: 'air' }])
+    world.dispose()
+  })
+
+  // 実機でも何も起きない所は 0 を返し、何も書かない。入った状態のレバーの要求は、切れて置かれる (V09 §4.1)。
+  it('置けない所と空気を壊すのは 0、入った状態のレバーの要求は切れて置かれる', () => {
+    const world = engine.createWorld()
+    world.load(floor())
+    drain(world)
+    expect(world.place(0, 0, 0, engine.resolve('redstone_lamp'))).toBe(0) // 石の上書き
+    expect(world.place(1, 3, 1, engine.resolve('redstone_wire'))).toBe(0) // 支えが無い
+    expect(world.breakBlock(1, 1, 1)).toBe(0) // 空気
+    expect(drain(world)).toEqual([])
+    expect(world.place(1, 1, 1, engine.resolve('lever[face=floor,powered=true]'))).toBe(0)
+    expect(drain(world)).toEqual([{ x: 1, y: 1, z: 1, block: 'lever[face=floor,facing=north,powered=false]' }])
+    world.dispose()
+  })
+
+  // 窓口は置く前に高さと格子の枠を確かめ、OUT_OF_WORLD を返す (SAFETY に落とさない)。壊すは範囲を確かめない。
+  it('高さの外・格子の枠の外に置くと OUT_OF_WORLD を投げ、壊すは 0', () => {
+    const world = engine.createWorld()
+    const stone = engine.resolve('stone')
+    world.load([{ x: 0, y: 0, z: 0, state: stone }])
+    drain(world)
+    for (const [x, y, z] of [
+      [0, 320, 0],
+      [0, -65, 0],
+      [16 * 256, 1, 0],
+      [0, 1, -16 * 256],
+    ]) {
+      expect(thrownStatus(() => world.place(x, y, z, stone))).toBe(STATUS.OUT_OF_WORLD)
+      expect(world.breakBlock(x, y, z)).toBe(0)
+    }
+    expect(drain(world)).toEqual([])
+    expect(world.step()).toBe(0) // 後から SAFETY が出てこない
+    expect(world.place(16 * 255, 0, 0, stone)).toBe(0)
+    expect(drain(world)).toEqual([{ x: 16 * 255, y: 0, z: 0, block: 'stone' }])
+    world.dispose()
+  })
+
+  // StateId の形でない state は wasm に渡す前に断る。表の外・空気・上のビットは wasm が ARGUMENT で断る。
+  it('置く state と arg の断り', () => {
+    const world = engine.createWorld()
+    world.load(floor())
+    drain(world)
+    const before = engine.epoch
+    for (const state of [-1, 1.5, 0x10000, Number.NaN, Number.POSITIVE_INFINITY, '1' as unknown as number]) {
+      expect(() => world.place(1, 1, 1, state)).toThrow(RangeError)
+    }
+    expect(() => world.place(1.5, 1, 1, 1)).toThrow(RangeError)
+    expect(() => world.breakBlock(1, 2 ** 31, 1)).toThrow(RangeError)
+    expect(engine.epoch).toBe(before) // どれも wasm を呼んでいない
+    const stone = engine.resolve('stone')
+    expect(thrownStatus(() => world.place(1, 1, 1, engine.states.size))).toBe(STATUS.ARGUMENT)
+    expect(thrownStatus(() => world.place(1, 1, 1, 0))).toBe(STATUS.ARGUMENT) // 空気
+    expect(thrownStatus(() => world.input('place', 'A', 1, 1, 1, stone | (1 << 16)))).toBe(STATUS.ARGUMENT)
+    expect(thrownStatus(() => world.input('break', 'A', 0, 0, 0, 1))).toBe(STATUS.ARGUMENT)
+    expect(drain(world)).toEqual([])
+    world.dispose()
+  })
+
+  // 時計は L5 のゲーム時刻 (V01 §2.3)。読み込みと入力では進まず、step(n) で n 進む。世界ごとに別。
+  it('時計は step で進み、読み込みと入力では進まない', () => {
+    const [a, b] = [engine.createWorld(), engine.createWorld()]
+    expect(a.gameTime()).toBe(0)
+    a.load(circuit())
+    a.use(0, 1, 0)
+    a.place(0, 1, 1, engine.resolve('redstone_wire'))
+    a.breakBlock(0, 1, 1)
+    expect(a.gameTime()).toBe(0)
+    a.step(3)
+    expect(a.gameTime()).toBe(3)
+    a.step(0)
+    expect(a.gameTime()).toBe(3)
+    a.step(5)
+    expect([a.gameTime(), b.gameTime()]).toEqual([8, 0])
+    b.step()
+    expect([a.gameTime(), b.gameTime()]).toEqual([8, 1])
+    a.dispose()
+    expect(thrownStatus(() => a.gameTime())).toBe(STATUS.HANDLE)
+    expect(b.gameTime()).toBe(1)
+    b.dispose()
+  })
+
+  // 時計を読むのも窓口の呼び出しなので、epoch が進み、前の変化の窓は古くなる。線形メモリは伸ばさない。
+  it('時計を読むと変化の窓が古くなる', () => {
+    const world = engine.createWorld()
+    world.load(circuit())
+    const w = world.changes()
+    expect(w.valid).toBe(true)
+    const [epoch, buffer] = [engine.epoch, engine.memory.buffer]
+    expect(world.gameTime()).toBe(0)
+    expect(engine.epoch).toBe(epoch + 1)
+    expect(engine.memory.buffer).toBe(buffer)
+    expect(w.valid).toBe(false)
+    expect(() => w.state(0)).toThrow('変化の窓は')
+    world.dispose()
+  })
+
+  // i64 は BigInt で来る。-1n はハンドルが無い印、0 以上の安全な整数の外は number に直せない。
+  it('時計の BigInt を number に直す', () => {
+    let value = 0n
+    const e = Engine.fromExports(patchedExports(() => ({ rse_game_time: () => value })), STATES)
+    const world = e.createWorld()
+    for (const ok of [0n, 1n, BigInt(Number.MAX_SAFE_INTEGER)]) {
+      value = ok
+      expect(world.gameTime()).toBe(Number(ok))
+    }
+    value = -1n
+    expect(thrownStatus(() => world.gameTime())).toBe(STATUS.HANDLE)
+    for (const bad of [BigInt(Number.MAX_SAFE_INTEGER) + 1n, 2n ** 63n - 1n, -2n, -(2n ** 63n)]) {
+      value = bad
+      expect(() => world.gameTime()).toThrow(RangeError)
+    }
+    world.dispose()
   })
 })
 
@@ -513,6 +722,7 @@ describe('安全網と trap', () => {
     )
     const world = e.createWorld()
     world.load(circuit(e))
+    const stone = e.resolve('stone')
     expect(world.step()).toBe(0)
     trap = true
     expect(() => world.step()).toThrow(EngineStoppedError)
@@ -527,6 +737,11 @@ describe('安全網と trap', () => {
     expect(() => world.load([])).toThrow(/^load: /)
     expect(() => world.step()).toThrow(/^step: /)
     expect(() => e.resolve('lever')).toThrow(/^resolve: /)
+    expect(() => world.use(0, 1, 0)).toThrow(/^use: /)
+    expect(() => world.place(1, 1, 1, stone)).toThrow(/^place: /)
+    expect(() => world.breakBlock(1, 1, 1)).toThrow(/^breakBlock: /)
+    expect(() => world.gameTime()).toThrow(/^gameTime: /)
+    expect(() => world.input('break', 'A', 1, 1, 1)).toThrow(/^input \(break\): /)
     // dispose は投げない (finally の中で、元の例外を隠さない)。安全網も呼ばない。
     expect(() => world.dispose()).not.toThrow()
     const core = new Core(patchedExports(() => ({})) as unknown as RseExports)

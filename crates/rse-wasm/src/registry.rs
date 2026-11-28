@@ -228,7 +228,7 @@ impl Registry {
         };
         let pos = Pos::new(x, y, z);
         let input = match kind {
-            // 使う入力は arg を読まない。読まない値が 0 でなければ断る。
+            // 使う入力と壊す入力は arg を読まない。読まない値が 0 でなければ断る。
             input_kind::USE if arg == 0 => Input::Use { pos },
             input_kind::SET_BLOCK => {
                 let (state, strict) = (arg & 0xFFFF, arg >> 16);
@@ -241,9 +241,38 @@ impl Registry {
                     strict: strict == 1,
                 }
             }
+            input_kind::PLACE => {
+                // 上の 16 ビットに読む値は無い。空気は置く物ではない (置く先を空ける入力は壊す)。
+                if arg > 0xFFFF || arg as usize >= STATE_COUNT {
+                    return status::ARGUMENT;
+                }
+                let state = StateId(arg as u16);
+                if state.is_air() {
+                    return status::ARGUMENT;
+                }
+                // 高さの外と格子の枠の外は、置く前に rse_load と同じ確かめで断る。rse-core の置く手順は、
+                // 格子の枠の外では書き込みまで進んで SAFETY を立てる。高さの外でも、規則のある種類は 2 つの口を呼んでから
+                // 書き込みで断り、規則の無い種類は置いた時の状態の口の答えで UNIMPLEMENTED を立てる。
+                // どちらも窓口からはそこへ渡さない。
+                // 置かれる状態は要求と同じブロックで空気にならないので、要求の状態で確かめてよい。
+                if !entry.world.can_set_all_raw([(pos, state)]) {
+                    return status::OUT_OF_WORLD;
+                }
+                Input::Place { pos, state }
+            }
+            // 範囲は確かめない。高さの外も格子の枠の外も空気で、壊しても何も起きない (rse-core の input.rs)。
+            input_kind::BREAK if arg == 0 => Input::Break { pos },
             _ => return status::ARGUMENT,
         };
         entry.world.input(section, input).status.0
+    }
+
+    /// ゲーム時刻 (L5 の時計)。ハンドルが無ければ -1。表を読むだけで、割り当てない。
+    pub(crate) fn game_time(&mut self, handle: u32) -> i64 {
+        match self.entry(handle) {
+            Some(entry) => entry.world.game_time(),
+            None => -1,
+        }
     }
 
     pub(crate) fn changes(&mut self, handle: u32, len_out: usize) -> *const CellRec {

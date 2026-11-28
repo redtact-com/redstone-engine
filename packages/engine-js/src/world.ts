@@ -1,7 +1,9 @@
 /**
  * 世界 1 つのハンドル (RustWorld) と、変化の窓 (ChangeWindow)。
  *
- * - 置く (load)・進める (step)・入力 (use・input)・変化を読む (changes)・捨てる (dispose)。
+ * - 盤面を読み込む (load)・進める (step)・入力 (use・place・breakBlock・input)・時計を読む (gameTime)・
+ *   変化を読む (changes)・捨てる (dispose)。
+ * - 窓口を呼ぶ操作は、どれも前に作った変化の窓を古くする (時計を読む gameTime も)。変化を読み切ってから時計を読む。
  * - 窓口の状態コード (上の 16 ビット) は使い方の誤りなので、EngineError を投げる。
  *   エンジンの状態コード (下の 16 ビット) は「実機と違う結果になりうる」の知らせなので、値で返す。
  *   どちらも黙って捨てない (19 §2.5)。
@@ -140,22 +142,73 @@ export class RustWorld {
 
   /** 使う (右クリック)。既定の区間はプレイヤーの操作 (A。19 §4.1) */
   use(x: number, y: number, z: number, section: Section = 'A'): number {
-    return this.input('use', section, x, y, z)
+    return this.#input('use', 'use', section, x, y, z, 0)
+  }
+
+  /**
+   * 置く (プレイヤーの設置。既定の区間は A。手順は V04 §4.13)。置いた時の状態は、周りを見てエンジンが決める
+   * (ダストの形は V06 §4.3・§4.4、ランプの lit は V11 §4.1)。
+   *
+   * - state は置くブロックと、プレイヤーの操作で決まる値 (レバーの face と facing) を運ぶ。ダストとランプは、どの状態を渡しても
+   *   同じ (既定の状態でよい)。レバーの powered も読まず、いつも切れて置かれる (V09 §4.1)。
+   * - レバーの face と facing は呼び手が決める。押した面と見ている向きから決める形 (V09 §4.1) は、エンジンに無い。
+   *   その向きに支えが無ければ、別の向きを探さずに置かない。
+   * - 置き換えられない所 (空気でない所)・支えの無い所には、何もせずに 0 を返す (実機でも何も起きない)。
+   * - 高さの外・格子の枠の外は、何もせずに EngineError (OUT_OF_WORLD) を投げる。表の外の StateId と空気は ARGUMENT。
+   * @param state StateId。0〜0xFFFF の整数でなければ、wasm を呼ばずに RangeError
+   * @returns エンジンの状態コード
+   */
+  place(x: number, y: number, z: number, state: number, section: Section = 'A'): number {
+    this.#live('place')
+    if (!Number.isInteger(state) || state < 0 || state > 0xffff) throw new RangeError(`StateId でない: ${state}`)
+    return this.#input('place', 'place', section, x, y, z, state)
+  }
+
+  /**
+   * 壊す (プレイヤーの破壊。既定の区間は A)。そのマスを空気にし、撤去の処理 (ダストの周りの更新ほか) はエンジンが走らせる。
+   * 範囲は確かめない。空気を壊しても (高さの外・格子の枠の外も空気)、何も起きずに 0 を返す。
+   * @returns エンジンの状態コード
+   */
+  breakBlock(x: number, y: number, z: number, section: Section = 'A'): number {
+    return this.#input('breakBlock', 'break', section, x, y, z, 0)
+  }
+
+  /**
+   * 世界のゲーム時刻 (L5 で進む時計。V01 §2.3)。作った直後は 0 で、読み込みと入力では進まず、step(n) で n 進む。
+   *
+   * 窓口を呼ぶので、前に作った変化の窓は使えなくなる。変化を読み切ってから時計を読む。
+   * 20 §3.1 の currentTick (読むだけの getter) に当たるが、getter にせずメソッドにしたのはこのため。
+   * wasm からは i64 が BigInt で来るので、number に直す。0 以上の安全な整数 (2^53 − 1 まで) でなければ RangeError。
+   */
+  gameTime(): number {
+    this.#live('gameTime')
+    const t = this.#core.call('gameTime', raw => raw.rse_game_time(this.#handle))
+    if (t === -1n) throw new EngineError('gameTime', ABI_STATUS.HANDLE)
+    if (t < 0n || t > BigInt(Number.MAX_SAFE_INTEGER)) throw new RangeError(`ゲーム時刻が 0 以上の安全な整数でない: ${t}`)
+    return Number(t)
   }
 
   /**
    * tick の外の入力を 1 件入れる。戻った時には連鎖が回り切っている。区間の印は順を変えない。
-   * @param arg setBlock は StateId | (strict << 16)。use は 0。0〜0xFFFFFFFF の整数
+   * @param arg setBlock は StateId | (strict << 16)。place は StateId。use と break は 0。0〜0xFFFFFFFF の整数
    * @returns エンジンの状態コード
    */
   input(kind: InputKind, section: Section, x: number, y: number, z: number, arg = 0): number {
-    this.#live(`input (${String(kind)})`)
+    return this.#input(`input (${String(kind)})`, kind, section, x, y, z, arg)
+  }
+
+  /**
+   * 入力の中身。`what` は呼んだ操作の名前 (use・place・breakBlock・input (種類))。捨てた後・止まった Engine・
+   * 窓口の状態コードの例外の文の頭は、どれもこの名前にする。
+   */
+  #input(what: string, kind: InputKind, section: Section, x: number, y: number, z: number, arg: number): number {
+    this.#live(what)
     const k = pick(INPUT_KIND, kind, '入力の種類')
     const s = pick(SECTION, section, '入力の区間')
     if (!Number.isInteger(arg) || arg < 0 || arg > 0xffffffff) throw new RangeError(`arg が 32 ビットの符号なし整数でない: ${arg}`)
     const pos = [int32(x, 'x'), int32(y, 'y'), int32(z, 'z')] as const
-    const status = this.#core.call('input', raw => raw.rse_input(this.#handle, k, s, pos[0], pos[1], pos[2], arg))
-    return this.#check(`input (${kind})`, status)
+    const status = this.#core.call(what, raw => raw.rse_input(this.#handle, k, s, pos[0], pos[1], pos[2], arg))
+    return this.#check(what, status)
   }
 
   /**

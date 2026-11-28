@@ -9,13 +9,17 @@
 //!   まだ族の crate が無い種類 (リピーター・ピストンほか) も、同じ腕に落ちる。
 //! - 信号の問い合わせは世界を書き換えられないので、未実装の種類は 0 を返すだけになる。
 //!   状態コードは、その素子が NC・SU・設置・撤去・予約 tick・入力のどれかを受けた時に立つ。
+//! - 置く入力の 2 つの口 (置いた時の状態・支え) も世界を書き換えられない。未実装の種類は、置いた時の状態の口が
+//!   「規則が無い」を返し、骨格が状態コードを立てて何も書かない。
 #![no_std]
 #![forbid(unsafe_code)]
+// doctest には crate の forbid が効かないので、doctest にも付ける (docs/wasm-abi.md §5)。今は doctest が無い。
+#![doc(test(attr(forbid(unsafe_code))))]
 
 pub use rse_core;
 pub use rse_core::{
-    Behavior, BlockId, Change, Config, Dir, Input, InputOutcome, InputSection, Pos, StateId,
-    Status, UpdateFlags,
+    Behavior, BlockId, Change, Config, Dir, Input, InputOutcome, InputSection, Placement, Pos,
+    StateId, Status, UpdateFlags,
 };
 
 #[cfg(feature = "redstone")]
@@ -190,6 +194,45 @@ impl Rules for Engine {
         }
     }
 
+    fn placement_state(lv: &Level<Self>, pos: Pos, requested: StateId) -> Placement {
+        let _ = (lv, pos);
+        match requested.behavior() {
+            // 空気は置く物ではない。
+            Behavior::Inert if requested.is_air() => Placement::Refused,
+            // プロパティを持たない材料 (石) は状態が 1 つなので、それを置く。
+            // プロパティを持つ材料は、置いた時の規則 (向きほか) がまだ無い。黙って要求の状態を置かない。
+            Behavior::Inert if requested.block().state_count() == 1 => Placement::State(requested),
+            // ダストは要求のプロパティを読まず、周りから形を決める。power は 0 (V06 §4.4)。
+            #[cfg(feature = "redstone")]
+            Behavior::Wire => Placement::State(wire::placement_state(lv, pos)),
+            // レバーは face と facing を要求のまま使い、powered は要求によらず偽にする (V09 §4.1)。
+            #[cfg(feature = "redstone")]
+            Behavior::Lever => Placement::State(lever::placement_state(requested)),
+            // ランプは、置く位置が受電していれば点いて置かれる (V11 §4.1)。
+            #[cfg(feature = "redstone")]
+            Behavior::Lamp => Placement::State(lamp::placement_state(lv, pos)),
+            _ => Placement::Unimplemented,
+        }
+    }
+
+    fn can_survive(lv: &Level<Self>, pos: Pos, state: StateId) -> bool {
+        let _ = (lv, pos);
+        match state.behavior() {
+            // 材料 (石) は canSurvive を上書きせず、既定の「常に真」を使う (V11 §4.1)。
+            Behavior::Inert => true,
+            #[cfg(feature = "redstone")]
+            Behavior::Wire => wire::can_survive(lv, pos),
+            #[cfg(feature = "redstone")]
+            Behavior::Lever => lever::can_survive(lv, pos, state),
+            // ランプも上書きしない。宙にも置ける (V11 §4.1)。
+            #[cfg(feature = "redstone")]
+            Behavior::Lamp => true,
+            // 未実装の種類は、置いた時の状態の口が先に止めるので、置く手順からはここへ来ない。
+            // 来た時は置かない側に倒す。
+            _ => false,
+        }
+    }
+
     fn signal(lv: &Level<Self>, pos: Pos, state: StateId, dir: Dir) -> i32 {
         let _ = (lv, pos, dir);
         match state.behavior() {
@@ -306,6 +349,21 @@ mod tests {
             assert!(world.remove_block(spot, false));
             assert_eq!(world.take_status(), Status::UNIMPLEMENTED, "{text} の撤去");
         }
+        // 置く入力: 族の素子は書かずに UNIMPLEMENTED。壊す入力は、撤去フックで UNIMPLEMENTED が立つ (消えはする)。
+        for text in ["lever[face=floor]", "redstone_wire", "redstone_lamp"] {
+            let place = Input::Place {
+                pos: spot,
+                state: parse(text),
+            };
+            let outcome = world.input(InputSection::A, place);
+            assert!(!outcome.accepted, "{text}");
+            assert_eq!(outcome.status, Status::UNIMPLEMENTED, "{text}");
+            assert_eq!(world.get_state(spot), StateId::AIR, "{text}");
+        }
+        let outcome = world.input(InputSection::A, Input::Break { pos: wire });
+        assert!(outcome.accepted);
+        assert_eq!(outcome.status, Status::UNIMPLEMENTED);
+        world.set_state_raw(wire, parse("redstone_wire[east=side,west=side]"));
         // 予約 tick。
         world.schedule_tick(
             lamp,
@@ -344,6 +402,35 @@ mod tests {
         assert_eq!(down(&mut world, wire, stone), wire_state);
         assert_eq!(down(&mut world, lever, stone), StateId::AIR);
         assert!(world.take_status().is_ok());
+    }
+
+    // 置く入力の材料の腕は、どちらの組み立てでも同じ: 石は置ける (支えは要らない)。空気は置かない。
+    // 空気でない所には置けない。壊すと空気に戻る。状態コードは立たない。
+    #[test]
+    fn inert_blocks_place_and_break_in_any_build() {
+        let mut world = new_world(Config::default());
+        let stone = block::STONE.default_state();
+        let spot = Pos::new(0, 5, 0);
+        let place = |world: &mut World, state| {
+            world.input(InputSection::A, Input::Place { pos: spot, state })
+        };
+        let refused = InputOutcome {
+            accepted: false,
+            status: Status::OK,
+        };
+        assert_eq!(place(&mut world, StateId::AIR), refused);
+        assert!(place(&mut world, stone).accepted);
+        assert_eq!(world.get_state(spot), stone);
+        assert_eq!(place(&mut world, stone), refused);
+        let broke = world.input(InputSection::A, Input::Break { pos: spot });
+        assert!(broke.accepted && broke.status.is_ok());
+        assert_eq!(world.get_state(spot), StateId::AIR);
+        assert_eq!(
+            world.input(InputSection::A, Input::Break { pos: spot }),
+            refused
+        );
+        assert_eq!(world.scheduled_tick_count(), 0);
+        assert_eq!(world.game_time(), 0);
     }
 
     // 材料 (石・空気) は、どちらの組み立てでも何も立てない。

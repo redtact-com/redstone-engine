@@ -519,4 +519,112 @@ mod tests {
         assert!(with("[]", "[]").unwrap().passed());
         assert!(run_json("{").is_err());
     }
+
+    /// 0 から n-1 までの並べ替えを全部作る (辞書順)。
+    fn permutations(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for rest in permutations(n - 1) {
+            for at in 0..n {
+                let mut next = rest.clone();
+                next.insert(at, n - 1);
+                out.push(next);
+            }
+        }
+        out.sort();
+        out
+    }
+
+    // 初めの盤面を、置く入力で組む。fixture 2 本とも、床 (y=0) の 10 マスを更新なしで置いてから、
+    // 上 (y=1) の 5 個 (レバー・ダスト 3 本・ランプ) を 120 通りの順で置く。
+    // - どの順でも、領域の全マスが fixture の初めの盤面と文字列まで同じになる。予約は 0 で、状態コードも立たない。
+    //   ダストの要求は既定の状態 (4 方向 none) で、形は置いた時の規則と形状更新が決める。
+    // - そこから fixture の入力で回すと、更新なしで読んだ世界 (上の試験が expect と比べている世界) と、
+    //   毎 tick 全マスが同じになる。
+    // fixture のファイルは変えない。入力の action に置くを足さない (実機のハーネスに無い)。
+    #[test]
+    fn initial_boards_can_be_built_by_placing_in_any_order() {
+        let orders = permutations(5);
+        // 120 通りが全部違う順であること (数だけでは、同じ順が重なっても通る)。
+        let distinct: std::collections::BTreeSet<&Vec<usize>> = orders.iter().collect();
+        assert_eq!((orders.len(), distinct.len()), (120, 120));
+        assert!(orders.iter().all(|o| {
+            let mut sorted = o.clone();
+            sorted.sort();
+            sorted == [0, 1, 2, 3, 4]
+        }));
+        for json in [LEVER_WIRE_LAMP, LAMP_OFF_DELAY] {
+            let fixture = Fixture::parse(json).unwrap();
+            let (floor, upper): (Vec<_>, Vec<_>) = fixture
+                .blocks
+                .iter()
+                .copied()
+                .partition(|(pos, _)| pos.y == 0);
+            assert_eq!((floor.len(), upper.len()), (10, 5));
+            let read_region = |world: &rse_engine::World| -> Vec<String> {
+                fixture
+                    .region()
+                    .map(|pos| world.get_state(pos).to_string())
+                    .collect()
+            };
+            // 比べる相手: 盤面をそのまま置いた世界。
+            let settled = || {
+                let mut world = new_world(Config::default());
+                for (pos, state) in &fixture.blocks {
+                    assert!(world.set_state_raw(*pos, *state));
+                }
+                world
+            };
+            let initial = read_region(&settled());
+            for order in &orders {
+                let mut world = new_world(Config::default());
+                for (pos, state) in &floor {
+                    assert!(world.set_state_raw(*pos, *state));
+                }
+                for i in order {
+                    let (pos, state) = upper[*i];
+                    // 周りで決まる値を捨てた要求にする。レバーは face と facing を運ぶので、そのまま。
+                    let requested = if state.block() == rse_engine::rse_core::state::block::LEVER {
+                        state
+                    } else {
+                        state.block().default_state()
+                    };
+                    let out = world.input(
+                        InputSection::A,
+                        Input::Place {
+                            pos,
+                            state: requested,
+                        },
+                    );
+                    assert!(out.accepted, "{} {order:?}", fixture.name);
+                    assert!(out.status.is_ok(), "{} {order:?}", fixture.name);
+                }
+                assert_eq!(read_region(&world), initial, "{} {order:?}", fixture.name);
+                assert_eq!(world.scheduled_tick_count(), 0);
+                assert_eq!(world.game_time(), 0);
+
+                let mut twin = settled();
+                for t in 0..=fixture.ticks {
+                    if t > 0 {
+                        assert!(world.tick().is_ok() && twin.tick().is_ok());
+                    }
+                    for marked in fixture.inputs_at(t) {
+                        let a = world.input(marked.section, marked.input);
+                        let b = twin.input(marked.section, marked.input);
+                        assert_eq!(a, b);
+                        assert!(a.status.is_ok());
+                    }
+                    assert_eq!(
+                        read_region(&world),
+                        read_region(&twin),
+                        "{} {order:?} tick {t}",
+                        fixture.name
+                    );
+                    assert_eq!(world.scheduled_tick_count(), twin.scheduled_tick_count());
+                }
+            }
+        }
+    }
 }
